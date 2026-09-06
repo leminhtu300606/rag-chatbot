@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+
+# Virtual env
+venv/
+.venv/
+env/
+.ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# RAG - keep data and db tracked, but ignore temp versions/history if needed
+# Uncomment to ignore:
+# chroma_db/
+# data/processed/.versions/
+# data/processed/.history.jsonl
