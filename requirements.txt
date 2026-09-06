@@ -1,0 +1,23 @@
+sentence-transformers
+transformers
+torch
+chromadb
+sentencepiece
+accelerate
+huggingface-hub
+pymupdf
+python-docx
+underthesea
+easyocr
+pytesseract
+numpy
+tqdm
+pandas
+pyarrow
+fastapi
+uvicorn[standard]
+
+# Sinh cau tra loi: mac dinh dung Ollama (da cai san, chay `ollama pull qwen2.5`).
+# Khong can them package Python vi generator.py goi Ollama qua requests (co san).
+# Neu doi LLM_BACKEND="transformers" trong src/config.py thi can them: ollama
+

@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ChatGPT — RAG Chatbot Học viện Kỹ thuật Mật mã</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar - ChatGPT style -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-top">
+        <button class="new-chat" id="new-chat">
+          <span class="plus">+</span> New chat
+          <i class="fa-regular fa-pen-to-square"></i>
+        </button>
+        <button class="sidebar-toggle" id="close-sidebar"><i class="fa-solid fa-chevron-left"></i></button>
+      </div>
+
+      <div class="history">
+        <div class="history-title">Lịch sử</div>
+        <div id="history-list" class="history-list">
+          <div class="history-item active">
+            <i class="fa-regular fa-message"></i>
+            <span>Cuộc trò chuyện mới</span>
+          </div>
+          <div class="history-item">
+            <i class="fa-regular fa-message"></i>
+            <span>Quy chế đào tạo là gì?</span>
+          </div>
+          <div class="history-item">
+            <i class="fa-regular fa-message"></i>
+            <span>Quy định khảo thí</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar-bottom">
+        <div class="sidebar-card" style="padding:10px">
+          <div class="status-line">
+            <span id="health-badge" class="dot warn"></span>
+            <span id="health-text" class="hint">checking...</span>
+          </div>
+          <div class="status-line">
+            <span id="history-badge" class="hint">💬 0 lượt • hội thoại mới</span>
+          </div>
+          <div id="session-info" class="hint" style="font-size:11px;word-break:break-all;margin-top:4px"></div>
+        </div>
+
+        <div class="user">
+          <div class="avatar-user">HV</div>
+          <div>
+            <div class="user-name">Học viên KTMM</div>
+            <div class="hint" id="llm-info">qwen2.5 • Ollama • vietnamese-embedding</div>
+          </div>
+          <button class="icon-btn" id="stats-btn" title="Thống kê"><i class="fa-solid fa-ellipsis"></i></button>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main - ChatGPT style -->
+    <main class="main">
+      <!-- Top bar - ChatGPT model selector -->
+      <header class="topbar">
+        <button class="icon-btn mobile" id="open-sidebar"><i class="fa-solid fa-bars"></i></button>
+        <div class="model-selector">
+          <button class="model active">RAG Chatbot <span>v1 • Học viện Kỹ thuật Mật mã</span></button>
+          <button class="model ghost"><i class="fa-solid fa-lock"></i> Quy chế • Quy định • Thông báo</button>
+        </div>
+        <div class="top-actions">
+          <a href="/docs" target="_blank" class="icon-btn" title="API Docs"><i class="fa-solid fa-code"></i></a>
+          <a href="/api/health" target="_blank" class="icon-btn" title="Health"><i class="fa-solid fa-heart-pulse"></i></a>
+        </div>
+      </header>
+
+      <!-- Messages - centered ChatGPT width -->
+      <div class="chat-wrap">
+        <div id="messages" class="messages">
+          <!-- Welcome - ChatGPT centered -->
+          <div class="welcome" id="welcome">
+            <div class="welcome-icon">🎓</div>
+            <h1>RAG Chatbot</h1>
+            <p>Hỏi đáp trên kho tài liệu nội bộ Học viện Kỹ thuật Mật mã<br>
+              <span>Chỉ trả lời dựa trên ngữ cảnh được cung cấp • Ghi rõ nguồn</span></p>
+            <div class="examples">
+              <button class="example" data-q="Quy chế đào tạo là gì?">
+                <i class="fa-regular fa-lightbulb"></i>
+                <b>Quy chế đào tạo</b><span>Quy chế đào tạo là gì?</span>
+              </button>
+              <button class="example" data-q="Quy định khảo thí như thế nào?">
+                <i class="fa-solid fa-graduation-cap"></i>
+                <b>Quy định khảo thí</b><span>Quy định về khảo thí?</span>
+              </button>
+              <button class="example" data-q="Học bổng KKHT xét thế nào?">
+                <i class="fa-solid fa-award"></i>
+                <b>Học bổng</b><span>Học bổng KKHT xét thế nào?</span>
+              </button>
+              <button class="example" data-q="Điều kiện tốt nghiệp?">
+                <i class="fa-solid fa-scroll"></i>
+                <b>Tốt nghiệp</b><span>Điều kiện tốt nghiệp?</span>
+              </button>
+            </div>
+            <div class="quick-hint">Gõ <code>quy_che: câu hỏi</code> để lọc danh mục • Dữ liệu từ <code>data/classified</code> → <code>chroma_db</code></div>
+          </div>
+        </div>
+
+        <!-- Composer - ChatGPT style -->
+        <div class="composer">
+          <div class="composer-inner">
+            <div class="input-box">
+              <textarea id="input" rows="1" placeholder="Nhắn cho RAG Chatbot..."></textarea>
+              <button id="send" class="send-btn" aria-label="Gửi"><i class="fa-solid fa-arrow-up"></i></button>
+            </div>
+            <div class="composer-foot">
+              <span id="status" class="hint"></span>
+              <span class="hint center">RAG có thể mắc lỗi. Kiểm tra nguồn bên phải.</span>
+              <span class="hint"><span id="model-foot">parquet • chroma • qwen2.5</span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Right panel - sources (ChatGPT doesn't have but we keep as drawer) -->
+    <aside class="right" id="right-panel">
+      <div class="right-head">
+        <h3><i class="fa-solid fa-link"></i> Nguồn tham khảo</h3>
+        <button class="icon-btn" id="close-right"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div id="sources" class="sources-list">
+        <p class="hint">Chưa có truy vấn.</p>
+      </div>
+      <div id="rewrite-info" class="hint hidden" style="padding:0 12px 8px;font-size:11px"></div>
+      <div id="summary-info" class="hint hidden" style="padding:0 12px 8px;font-size:11px;border-top:1px dashed rgba(255,255,255,.08);margin-top:8px"></div>
+      <div id="context" class="context-wrap hidden">
+        <h4>Context (rerank top 3)</h4>
+        <div id="context-list"></div>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Stats Modal -->
+  <dialog id="stats-modal">
+    <form method="dialog">
+      <h3>Thống kê hệ thống</h3>
+      <pre id="stats-pre">Đang tải...</pre>
+      <button class="btn">Đóng</button>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>
