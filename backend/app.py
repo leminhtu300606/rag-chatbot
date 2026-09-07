@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 import time
 import uuid
 import threading
+import json
 
 import backend.config as cfg
 
@@ -88,53 +89,125 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Quản lý phiên hội thoại (session memory) ──
-# Lưu trữ in-memory: {session_id: {"history": [...], "summary": str|None, "updated_at": float, "created_at": float}}
+# ── Quản lý phiên hội thoại (session memory + persistent) ──
+# Lưu trữ in-memory + persist ra file JSON để sống qua restart: {session_id: {"history": [...], "summary": str|None, "title": str|None, "style": str, "updated_at": float, "created_at": float}}
 _sessions: Dict[str, Dict[str, Any]] = {}
 _sessions_lock = threading.Lock()
 MAX_SESSIONS = 200
 SESSION_TTL_SECONDS = 24 * 3600  # 24h
+SESSIONS_FILE = cfg.BASE_DIR / "data" / "sessions.json"
+
+def _save_sessions():
+    """Ghi _sessions ra file JSON (gọi trong lock hoặc sẽ tự lock)."""
+    try:
+        SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # copy dưới lock để tránh race
+        with _sessions_lock:
+            data = dict(_sessions)
+        # ghi atomically
+        tmp = SESSIONS_FILE.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        tmp.replace(SESSIONS_FILE)
+    except Exception as e:
+        print(f"[sessions] save failed: {e}")
+
+def _load_sessions():
+    """Load sessions từ file nếu có."""
+    try:
+        if SESSIONS_FILE.exists():
+            with open(SESSIONS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                with _sessions_lock:
+                    for sid, v in data.items():
+                        if not isinstance(v, dict):
+                            continue
+                        # đảm bảo field
+                        v.setdefault("history", [])
+                        v.setdefault("summary", None)
+                        v.setdefault("title", None)
+                        v.setdefault("style", cfg.DEFAULT_STYLE)
+                        v.setdefault("created_at", time.time())
+                        v.setdefault("updated_at", time.time())
+                        # chuẩn hóa history
+                        if not isinstance(v["history"], list):
+                            v["history"] = []
+                        _sessions[sid] = v
+                print(f"[sessions] loaded {len(_sessions)} from {SESSIONS_FILE}")
+    except Exception as e:
+        print(f"[sessions] load failed: {e}")
+
+# load ngay khi import
+_load_sessions()
 
 def _cleanup_sessions():
     now = time.time()
+    removed = False
     with _sessions_lock:
         expired = [sid for sid, v in _sessions.items() if now - v.get("updated_at", 0) > SESSION_TTL_SECONDS]
         for sid in expired:
             _sessions.pop(sid, None)
+            removed = True
         # gioi han so luong: xoa cu nhat
         if len(_sessions) > MAX_SESSIONS:
             sorted_sids = sorted(_sessions.items(), key=lambda x: x[1].get("updated_at", 0))
             for sid, _ in sorted_sids[: len(_sessions) - MAX_SESSIONS]:
                 _sessions.pop(sid, None)
+                removed = True
+    if removed:
+        _save_sessions()
 
-def _get_or_create_session(session_id: Optional[str]) -> str:
+def _get_or_create_session(session_id: Optional[str], title: Optional[str] = None, style: Optional[str] = None) -> str:
     _cleanup_sessions()
+    # chuẩn hóa style
+    if style and style not in cfg.AVAILABLE_STYLES:
+        style = cfg.DEFAULT_STYLE
     if session_id and isinstance(session_id, str) and session_id.strip():
         sid = session_id.strip()
+        created = False
         with _sessions_lock:
             if sid not in _sessions:
-                _sessions[sid] = {"history": [], "summary": None, "created_at": time.time(), "updated_at": time.time()}
+                _sessions[sid] = {"history": [], "summary": None, "title": title, "style": style or cfg.DEFAULT_STYLE, "created_at": time.time(), "updated_at": time.time()}
+                created = True
+            else:
+                if title and not _sessions[sid].get("title"):
+                    _sessions[sid]["title"] = title
+                if style and _sessions[sid].get("style") != style:
+                    # nếu caller truyền style mới thì cập nhật
+                    _sessions[sid]["style"] = style
+        if created:
+            _save_sessions()
         return sid
     # tao moi
     sid = str(uuid.uuid4())
     with _sessions_lock:
-        _sessions[sid] = {"history": [], "summary": None, "created_at": time.time(), "updated_at": time.time()}
+        _sessions[sid] = {"history": [], "summary": None, "title": title, "style": style or cfg.DEFAULT_STYLE, "created_at": time.time(), "updated_at": time.time()}
+    _save_sessions()
     return sid
 
-def _append_to_session(session_id: str, user_q: str, assistant_a: str, summary: Optional[str] = None):
+def _append_to_session(session_id: str, user_q: str, assistant_a: str, summary: Optional[str] = None, style: Optional[str] = None):
+    need_save = False
     with _sessions_lock:
         sess = _sessions.get(session_id)
         if not sess:
-            _sessions[session_id] = {"history": [], "summary": summary, "created_at": time.time(), "updated_at": time.time()}
+            _sessions[session_id] = {"history": [], "summary": summary, "title": None, "style": style or cfg.DEFAULT_STYLE, "created_at": time.time(), "updated_at": time.time()}
             sess = _sessions[session_id]
+            need_save = True
         sess["history"].append({"role": "user", "content": user_q})
         sess["history"].append({"role": "assistant", "content": assistant_a})
         if summary:
             sess["summary"] = summary
+        if style and style in cfg.AVAILABLE_STYLES:
+            sess["style"] = style
+        # tự đặt title từ câu hỏi đầu tiên nếu chưa có
+        if not sess.get("title") and user_q:
+            sess["title"] = user_q.strip()[:50]
         sess["updated_at"] = time.time()
         # gioi han lich su luu toi da 100 messages de tranh phinh
         if len(sess["history"]) > 100:
             sess["history"] = sess["history"][-100:]
+    _save_sessions()
 
 # --- Models ---
 class ChatMessage(BaseModel):
@@ -151,6 +224,7 @@ class ChatRequest(BaseModel):
     history: Optional[List[ChatMessage]] = None
     session_id: Optional[str] = None
     use_history: bool = True  # cho phép tắt lịch sử để hỏi đơn lượt
+    style: Optional[str] = None  # phong cách do frontend gửi hoặc để trống sẽ tự phát hiện qua câu tự nhiên
 
 class ChatResponse(BaseModel):
     answer: str
@@ -161,6 +235,7 @@ class ChatResponse(BaseModel):
     standalone_question: Optional[str] = None
     summary: Optional[str] = None
     history_used: Optional[List[Dict[str, Any]]] = None
+    style: Optional[str] = None  # phong cách hiện tại của phiên
 
 # --- Helpers ---
 def _get_stats():
@@ -225,6 +300,8 @@ async def get_session(session_id: str):
             "session_id": session_id,
             "history": sess["history"],
             "summary": sess.get("summary"),
+            "title": sess.get("title"),
+            "style": sess.get("style", cfg.DEFAULT_STYLE),
             "created_at": sess.get("created_at"),
             "updated_at": sess.get("updated_at"),
             "turns": len(sess["history"]) // 2,
@@ -235,25 +312,68 @@ async def delete_session(session_id: str):
     with _sessions_lock:
         if session_id in _sessions:
             _sessions.pop(session_id)
-            return {"deleted": session_id}
-        raise HTTPException(status_code=404, detail="Session not found")
+        else:
+            raise HTTPException(status_code=404, detail="Session not found")
+    _save_sessions()
+    return {"deleted": session_id}
 
 @app.get("/api/sessions")
 async def list_sessions():
     with _sessions_lock:
+        sessions = list(_sessions.items())
+    # sort mới nhất trước
+    sessions.sort(key=lambda x: x[1].get("updated_at", 0), reverse=True)
+    return {
+        "sessions": [
+            {
+                "session_id": sid,
+                "title": v.get("title") or (v["history"][0]["content"][:40] if v["history"] else "Cuộc trò chuyện mới"),
+                "preview": (v["history"][-2]["content"][:80] if len(v["history"]) >= 2 else (v["history"][-1]["content"][:80] if v["history"] else "")),
+                "turns": len(v["history"]) // 2,
+                "updated_at": v.get("updated_at"),
+                "created_at": v.get("created_at"),
+                "summary": v.get("summary"),
+                "style": v.get("style", cfg.DEFAULT_STYLE),
+            }
+            for sid, v in sessions
+        ],
+        "total": len(sessions),
+    }
+
+class CreateSessionRequest(BaseModel):
+    title: Optional[str] = None
+    session_id: Optional[str] = None
+    style: Optional[str] = None
+
+@app.post("/api/sessions")
+async def create_session(req: CreateSessionRequest = None):
+    title = (req.title.strip()[:50] if req and req.title and req.title.strip() else None)
+    style = (req.style.strip().lower() if req and req.style and req.style.strip().lower() in cfg.AVAILABLE_STYLES else None)
+    sid = _get_or_create_session(req.session_id if req and req.session_id else None, title=title, style=style)
+    with _sessions_lock:
+        sess = _sessions[sid]
         return {
-            "sessions": [
-                {
-                    "session_id": sid,
-                    "turns": len(v["history"]) // 2,
-                    "updated_at": v.get("updated_at"),
-                    "created_at": v.get("created_at"),
-                    "summary": v.get("summary"),
-                }
-                for sid, v in _sessions.items()
-            ],
-            "total": len(_sessions),
+            "session_id": sid,
+            "title": sess.get("title"),
+            "style": sess.get("style", cfg.DEFAULT_STYLE),
+            "created_at": sess.get("created_at"),
+            "updated_at": sess.get("updated_at"),
+            "history": sess.get("history", []),
         }
+
+class UpdateSessionRequest(BaseModel):
+    title: str
+
+@app.patch("/api/sessions/{session_id}")
+async def update_session(session_id: str, req: UpdateSessionRequest):
+    with _sessions_lock:
+        sess = _sessions.get(session_id)
+        if not sess:
+            raise HTTPException(status_code=404, detail="Session not found")
+        sess["title"] = req.title.strip()[:50]
+        sess["updated_at"] = time.time()
+    _save_sessions()
+    return {"session_id": session_id, "title": req.title.strip()[:50]}
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
@@ -265,64 +385,131 @@ async def chat(req: ChatRequest):
         raise HTTPException(status_code=400, detail=f"Category khong hop le. Chon trong: {cfg.CATEGORY_ORDER}")
 
     # Kiem tra co data truoc khi goi LLM (tranh goi Ollama khi chua co data)
+    # Nhưng với câu xã giao thì không cần data, cho phép trả lời ngay bằng giọng đời thường
+    is_social_early = False
     try:
-        from backend.indexing.vectorstore import count as vec_count
-        from backend.preprocessing.storage import get_processed_files
-        if vec_count() == 0 or len(get_processed_files()) == 0:
-            sid = _get_or_create_session(req.session_id) if req.session_id or req.history else None
-            return ChatResponse(
-                answer="Chua co du lieu de tra loi. Vui long chay: python -m backend.clean && python -m backend.index --rebuild, sau do thu lai.",
-                sources=[],
-                context=[] if req.show_context else None,
-                session_id=sid,
-            )
+        from backend.generation.generator import is_social_question
+        is_social_early = is_social_question(req.question, None)
     except Exception:
         pass
+    if not is_social_early:
+        try:
+            from backend.indexing.vectorstore import count as vec_count
+            from backend.preprocessing.storage import get_processed_files
+            if vec_count() == 0 or len(get_processed_files()) == 0:
+                sid = _get_or_create_session(req.session_id) if req.session_id or req.history else None
+                return ChatResponse(
+                    answer="Chua co du lieu de tra loi. Vui long chay: python -m backend.clean && python -m backend.index --rebuild, sau do thu lai.",
+                    sources=[],
+                    context=[] if req.show_context else None,
+                    session_id=sid,
+                )
+        except Exception:
+            pass
 
     try:
-        # Chọn pipeline có/không có lịch sử hội thoại
+        # Xác định phong cách: ưu tiên req.style -> phát hiện qua câu tự nhiên -> style lưu trong phiên -> mặc định
+        effective_style = None
+        if req.style and req.style.strip().lower() in cfg.AVAILABLE_STYLES:
+            effective_style = req.style.strip().lower()
+        else:
+            try:
+                from backend.generation.generator import detect_style_change
+                detected = detect_style_change(req.question)
+                if detected:
+                    effective_style = detected
+            except Exception:
+                pass
+
+        # Chọn pipeline có/không có lịch sử hội thoại — ưu tiên server làm source of truth
         use_history = req.use_history and (req.history or req.session_id)
 
-        # Hợp nhất lịch sử từ session lưu trên server và request từ client
         effective_history: Optional[List[Dict[str, Any]]] = None
         session_id: Optional[str] = None
+        session_style = None
 
         if use_history:
-            # Lay hoac tao session
-            if req.session_id or req.history:
-                session_id = _get_or_create_session(req.session_id)
-                # Lay history tu session store
+            if req.session_id:
+                # Có session_id -> tái sử dụng phiên đó (không tạo mới mỗi câu hỏi)
+                # Lấy style hiện tại của phiên nếu chưa có effective_style
+                with _sessions_lock:
+                    existing_style = _sessions.get(req.session_id.strip(), {}).get("style") if req.session_id and req.session_id.strip() else None
+                if not effective_style and existing_style and existing_style in cfg.AVAILABLE_STYLES:
+                    effective_style = existing_style
+                if not effective_style:
+                    effective_style = cfg.DEFAULT_STYLE
+                session_id = _get_or_create_session(req.session_id, style=effective_style)
                 with _sessions_lock:
                     sess_hist = list(_sessions[session_id]["history"]) if session_id in _sessions else []
-                # Merge voi history tu client (client history uu tien neu dai hon)
-                if req.history:
-                    # req.history la List[ChatMessage], convert sang dict
+                    session_style = _sessions[session_id].get("style", effective_style) if session_id in _sessions else effective_style
+                # Nếu phát hiện đổi phong cách, cập nhật ngay vào session
+                if effective_style and session_style != effective_style:
+                    with _sessions_lock:
+                        if session_id in _sessions:
+                            _sessions[session_id]["style"] = effective_style
+                            _sessions[session_id]["updated_at"] = time.time()
+                    _save_sessions()
+                    session_style = effective_style
+                else:
+                    effective_style = session_style or effective_style
+
+                if sess_hist:
+                    effective_history = sess_hist
+                elif req.history:
+                    # server trống (sau restart trước khi có persist hoặc phiên mới) -> lấy client
                     client_hist = [{"role": m.role, "content": m.content} for m in req.history]
-                    # neu client gui day du hon server thi dung client, nguoc lai merge
-                    if len(client_hist) > len(sess_hist):
-                        effective_history = client_hist
-                    else:
-                        # merge: server history + client history moi nhat (tranh duplicate)
-                        # Diem don gian: neu client history khac rong thi dung client, con khong dung server
-                        effective_history = client_hist if client_hist else sess_hist
-                    # dong bo lai session store neu client dai hon
-                    if len(client_hist) > len(sess_hist):
+                    effective_history = client_hist if client_hist else None
+                    # đồng bộ client lên server
+                    if client_hist:
                         with _sessions_lock:
                             if session_id in _sessions:
                                 _sessions[session_id]["history"] = client_hist
                                 _sessions[session_id]["updated_at"] = time.time()
+                        _save_sessions()
                 else:
-                    effective_history = sess_hist if sess_hist else None
+                    effective_history = None
+            elif req.history:
+                # Có history nhưng chưa có session_id -> tạo phiên mới từ history client
+                if not effective_style:
+                    effective_style = cfg.DEFAULT_STYLE
+                client_hist = [{"role": m.role, "content": m.content} for m in req.history]
+                session_id = _get_or_create_session(None, style=effective_style)
+                effective_history = client_hist if client_hist else None
+                if client_hist:
+                    with _sessions_lock:
+                        if session_id in _sessions:
+                            _sessions[session_id]["history"] = client_hist
+                            _sessions[session_id]["updated_at"] = time.time()
+                    _save_sessions()
+                session_style = effective_style
             else:
-                # khong co session_id nhung co history: dung truc tiep
-                if req.history:
-                    effective_history = [{"role": m.role, "content": m.content} for m in req.history]
+                # use_history true nhưng không có gì -> tạo phiên mới rỗng
+                if not effective_style:
+                    effective_style = cfg.DEFAULT_STYLE
+                session_id = _get_or_create_session(None, style=effective_style)
+                effective_history = None
+                session_style = effective_style
         else:
-            # single-turn
+            # single-turn: không dùng lịch sử, nhưng vẫn giữ session_id nếu client gửi
             effective_history = None
-            session_id = req.session_id  # giu nguyen neu client gui
+            session_id = req.session_id.strip() if req.session_id and req.session_id.strip() else None
+            if not effective_style:
+                # lấy style từ session nếu có
+                with _sessions_lock:
+                    existing_style = _sessions.get(session_id, {}).get("style") if session_id else None
+                effective_style = existing_style or cfg.DEFAULT_STYLE
+            # nếu client gửi use_history=false nhưng vẫn có session_id thì đảm bảo phiên tồn tại
+            if session_id:
+                _get_or_create_session(session_id, style=effective_style)
+                session_style = effective_style
+            else:
+                session_style = effective_style
 
-        # Goi RAG tuong ung
+        # Đảm bảo effective_style luôn có giá trị
+        if not effective_style:
+            effective_style = session_style or cfg.DEFAULT_STYLE
+
+        # Goi RAG tuong ung (truyền phong cách)
         if effective_history:
             from backend.generation.rag import answer_with_history
             res = answer_with_history(
@@ -331,12 +518,32 @@ async def chat(req: ChatRequest):
                 category=req.category,
                 top_k=req.top_k,
                 use_rerank=req.use_rerank,
+                style=effective_style,
             )
-            # Luu vao session sau khi co ket qua
+            # Cập nhật style từ kết quả nếu có (phát hiện đổi phong cách)
+            final_style = res.get("style", effective_style)
+            # Lưu vào session sau khi có kết quả (kèm style và summary)
             if session_id:
-                _append_to_session(session_id, req.question, res["answer"], res.get("summary"))
+                _append_to_session(session_id, req.question, res["answer"], res.get("summary"), style=final_style)
+                # đảm bảo session style đồng bộ
+                with _sessions_lock:
+                    if session_id in _sessions and final_style in cfg.AVAILABLE_STYLES:
+                        _sessions[session_id]["style"] = final_style
+                _save_sessions()
 
             if not res.get("context"):
+                # Trường hợp chỉ đổi phong cách không cần context, vẫn trả về style
+                if res.get("style"):
+                    return ChatResponse(
+                        answer=res["answer"],
+                        sources=[],
+                        context=[] if req.show_context else None,
+                        session_id=session_id,
+                        standalone_question=res.get("standalone_question"),
+                        summary=res.get("summary"),
+                        history_used=res.get("history_used"),
+                        style=final_style,
+                    )
                 return ChatResponse(
                     answer="Chua co du lieu de tra loi. Vui long chay: python -m backend.clean && python -m backend.index --rebuild, sau do thu lai.",
                     sources=[],
@@ -345,6 +552,7 @@ async def chat(req: ChatRequest):
                     standalone_question=res.get("standalone_question"),
                     summary=res.get("summary"),
                     history_used=res.get("history_used"),
+                    style=final_style,
                 )
             context = res.get("context", []) if req.show_context else None
             return ChatResponse(
@@ -355,6 +563,7 @@ async def chat(req: ChatRequest):
                 standalone_question=res.get("standalone_question"),
                 summary=res.get("summary"),
                 history_used=res.get("history_used"),
+                style=final_style,
             )
         else:
             # Chế độ đơn lượt (không dùng lịch sử)
@@ -364,13 +573,29 @@ async def chat(req: ChatRequest):
                 category=req.category,
                 top_k=req.top_k,
                 use_rerank=req.use_rerank,
+                style=effective_style,
             )
+            final_style = res.get("style", effective_style)
             if not res.get("context"):
+                # Nếu chỉ đổi phong cách
+                if res.get("style") and not res.get("context"):
+                    # trả về luôn nếu có answer dù không có context (trường hợp đổi style)
+                    if res.get("answer"):
+                        if session_id:
+                            _append_to_session(session_id, req.question, res["answer"], style=final_style)
+                        return ChatResponse(
+                            answer=res["answer"],
+                            sources=[],
+                            context=[] if req.show_context else None,
+                            session_id=session_id,
+                            style=final_style,
+                        )
                 return ChatResponse(
                     answer="Chua co du lieu de tra loi. Vui long chay: python -m backend.clean && python -m backend.index --rebuild, sau do thu lai.",
                     sources=[],
                     context=[] if req.show_context else None,
                     session_id=session_id,
+                    style=final_style,
                 )
             context = None
             if req.show_context:
@@ -378,13 +603,18 @@ async def chat(req: ChatRequest):
 
             # Van luu vao session neu co session_id du la single-turn
             if session_id:
-                _append_to_session(session_id, req.question, res["answer"])
+                _append_to_session(session_id, req.question, res["answer"], style=final_style)
+                with _sessions_lock:
+                    if session_id in _sessions and final_style in cfg.AVAILABLE_STYLES:
+                        _sessions[session_id]["style"] = final_style
+                _save_sessions()
 
             return ChatResponse(
                 answer=res["answer"],
                 sources=res.get("sources", []),
                 context=context,
                 session_id=session_id,
+                style=final_style,
             )
     except HTTPException:
         raise

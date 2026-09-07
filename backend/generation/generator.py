@@ -25,6 +25,12 @@ from backend.config import (
     REWRITE_MODEL,
     SUMMARY_MAX_TOKENS,
     SUMMARY_MODEL,
+    AVAILABLE_STYLES,
+    DEFAULT_STYLE,
+    STYLE_KEYWORDS,
+    STYLE_TEMPERATURE,
+    ENABLE_SOCIAL,
+    SOCIAL_ALLOWLIST,
 )
 from .prompts import (
     SYSTEM_PROMPT,
@@ -33,19 +39,23 @@ from .prompts import (
     build_prompt_text,
     build_rewrite_messages,
     build_summary_messages,
+    build_social_messages,
 )
 
 _gen = None
 
 
-def _call_ollama(messages: list[dict], model: str, max_tokens: int, think: bool = False) -> str:
+def _call_ollama(messages: list[dict], model: str, max_tokens: int, think: bool = False, temperature: float | None = None) -> str:
     """Gọi Ollama /api/chat với danh sách messages và trả về nội dung trả lời."""
+    options = {"num_predict": max_tokens}
+    if temperature is not None:
+        options["temperature"] = temperature
     payload = {
         "model": model,
         "messages": messages,
         "stream": False,
         "think": think,
-        "options": {"num_predict": max_tokens},
+        "options": options,
     }
     try:
         resp = requests.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=600)
@@ -78,18 +88,20 @@ def _call_ollama(messages: list[dict], model: str, max_tokens: int, think: bool 
     return resp.json()["message"]["content"].strip()
 
 
-def _generate_ollama(context: list[dict], question: str) -> str:
+def _generate_ollama(context: list[dict], question: str, style: str | None = None) -> str:
     """Sinh câu trả lời đơn lượt qua Ollama."""
-    messages = build_messages(context, question)
-    return _call_ollama(messages, LLM_MODEL, GEN_MAX_TOKENS, LLM_THINK)
+    messages = build_messages(context, question, style=style)
+    temp = STYLE_TEMPERATURE.get(style) if style else None
+    return _call_ollama(messages, LLM_MODEL, GEN_MAX_TOKENS, LLM_THINK, temperature=temp)
 
 
 def _generate_ollama_with_history(
-    context: list[dict], question: str, history: list[dict] | None, summary: str | None
+    context: list[dict], question: str, history: list[dict] | None, summary: str | None, style: str | None = None
 ) -> str:
     """Sinh câu trả lời có kèm lịch sử hội thoại qua Ollama."""
-    messages = build_messages_with_history(context, question, history, summary)
-    return _call_ollama(messages, LLM_MODEL, GEN_MAX_TOKENS, LLM_THINK)
+    messages = build_messages_with_history(context, question, history, summary, style=style)
+    temp = STYLE_TEMPERATURE.get(style) if style else None
+    return _call_ollama(messages, LLM_MODEL, GEN_MAX_TOKENS, LLM_THINK, temperature=temp)
 
 
 def _get_transformers_gen():
@@ -105,33 +117,33 @@ def _get_transformers_gen():
     return _gen
 
 
-def _generate_transformers(context: list[dict], question: str) -> str:
+def _generate_transformers(context: list[dict], question: str, style: str | None = None) -> str:
     """Sinh câu trả lời đơn lượt qua transformers pipeline."""
     gen = _get_transformers_gen()
     prompt = "\n\n".join(
-        f"{m['role']}: {m['content']}" for m in build_messages(context, question)
+        f"{m['role']}: {m['content']}" for m in build_messages(context, question, style=style)
     )
     out = gen(prompt, max_new_tokens=GEN_MAX_TOKENS, do_sample=False, return_full_text=False)
     return out[0]["generated_text"].strip()
 
 
 def _generate_transformers_with_history(
-    context: list[dict], question: str, history: list[dict] | None, summary: str | None
+    context: list[dict], question: str, history: list[dict] | None, summary: str | None, style: str | None = None
 ) -> str:
     """Sinh câu trả lời có kèm lịch sử qua transformers pipeline."""
     gen = _get_transformers_gen()
     from .prompts import build_prompt_text_with_history
 
-    prompt = build_prompt_text_with_history(context, question, history, summary)
+    prompt = build_prompt_text_with_history(context, question, history, summary, style=style)
     out = gen(prompt, max_new_tokens=GEN_MAX_TOKENS, do_sample=False, return_full_text=False)
     return out[0]["generated_text"].strip()
 
 
-def generate(context: list[dict], question: str) -> str:
+def generate(context: list[dict], question: str, style: str | None = None) -> str:
     """Sinh câu trả lời đơn lượt (tự chọn backend theo cấu hình)."""
     if LLM_BACKEND == "ollama":
-        return _generate_ollama(context, question)
-    return _generate_transformers(context, question)
+        return _generate_ollama(context, question, style=style)
+    return _generate_transformers(context, question, style=style)
 
 
 def generate_with_history(
@@ -139,11 +151,12 @@ def generate_with_history(
     question: str,
     history: list[dict] | None = None,
     summary: str | None = None,
+    style: str | None = None,
 ) -> str:
     """Sinh câu trả lời có kèm lịch sử hội thoại và tóm tắt (tự chọn backend)."""
     if LLM_BACKEND == "ollama":
-        return _generate_ollama_with_history(context, question, history, summary)
-    return _generate_transformers_with_history(context, question, history, summary)
+        return _generate_ollama_with_history(context, question, history, summary, style=style)
+    return _generate_transformers_with_history(context, question, history, summary, style=style)
 
 
 # ── Viết lại câu hỏi ──
@@ -190,12 +203,12 @@ _SHORT_FOLLOWUP = ["là gì?", "là sao?", "tại sao?", "thế nào?", "bao nhi
 
 
 def _needs_rewrite(question: str, history: list[dict] | None) -> bool:
-    """Kiểm tra câu hỏi có cần viết lại để thành dạng độc lập hay không."""
+    """Kiểm tra câu hỏi có cần viết lại để thành dạng độc lập hay không - cân bằng."""
     if not history:
         return False
     q_low = question.strip().lower()
-    # Câu rất ngắn thường là câu nối tiếp
-    if len(q_low) < 12:
+    # Câu rất ngắn thường là câu nối tiếp -> cần nhớ từ đầu phiên
+    if len(q_low) < 15:
         return True
     for kw in _SHORT_FOLLOWUP:
         if q_low == kw or q_low.startswith(kw):
@@ -204,11 +217,10 @@ def _needs_rewrite(question: str, history: list[dict] | None) -> bool:
     for p in _PRONOUNS:
         if p in q_low:
             return True
-    # Đại từ dạng token riêng biệt
     tokens = [t.strip('.,?:;!\"\'') for t in q_low.split()]
     if "nó" in tokens or "no" in tokens:
         return True
-    # Câu quá ngắn, thiếu danh từ cụ thể
+    # Câu ngắn, thiếu danh từ cụ thể -> cần làm giàu bằng ngữ cảnh phiên (cân bằng: 4 từ)
     if len(q_low.split()) <= 4:
         return True
     return False
@@ -258,7 +270,7 @@ def rewrite_query(question: str, history: list[dict] | None) -> str:
 
 
 def summarize_history(history: list[dict]) -> str:
-    """Tóm tắt lịch sử hội thoại dài thành 3-5 câu ngắn gọn."""
+    """Tóm tắt lịch sử hội thoại dài thành 4-6 câu ngắn gọn - nhớ từ đầu phiên, cân bằng."""
     if not history or len(history) <= 4:
         return ""
     model = SUMMARY_MODEL or LLM_MODEL
@@ -271,8 +283,131 @@ def summarize_history(history: list[dict]) -> str:
             prompt = "\n\n".join(f"{m['role']}: {m['content']}" for m in messages)
             out = gen(prompt, max_new_tokens=SUMMARY_MAX_TOKENS, do_sample=False, return_full_text=False)
             summary = out[0]["generated_text"].strip()
-        return summary.strip()[:800]
+        # Tăng giới hạn để giữ ý từ đầu phiên
+        return summary.strip()[:900]
     except Exception:
-        # Fallback: nối các message đầu thành tóm tắt thô
-        parts = [f"{m.get('role')}: {m.get('content','')[:80]}" for m in history[:6]]
-        return " | ".join(parts)[:600]
+        # Fallback: nối các message đầu thành tóm tắt thô, giữ thứ tự từ đầu
+        parts = [f"{m.get('role')}: {m.get('content','')[:90]}" for m in history[:8]]
+        return " | ".join(parts)[:700]
+
+
+# ── Phát hiện đổi phong cách qua câu tự nhiên ──
+_STYLE_INTENT_KEYWORDS = ["đổi", "chuyển", "phong cách", "giọng", "kiểu", "giải thích", "trả lời", "dùng", "không dùng", "đừng", "hãy", "theo", "style", "giong", "kieu"]
+
+def detect_style_change(question: str) -> str | None:
+    """Phát hiện yêu cầu đổi phong cách trong câu hỏi tự nhiên.
+    Trả về tên style nếu phát hiện, None nếu không.
+    Yêu cầu có cả từ khóa phong cách và từ khóa ý định để tránh nhầm."""
+    if not question or not question.strip():
+        return None
+    q_low = question.lower()
+    # kiểm tra có ý định đổi phong cách không
+    has_intent = any(kw in q_low for kw in _STYLE_INTENT_KEYWORDS)
+    if not has_intent:
+        # vẫn kiểm tra trường hợp câu chỉ chứa kiểu plain đặc biệt như "không gọi hàm" dù không có từ đổi
+        if "không gọi hàm" in q_low or "không dùng hàm" in q_low or "không giải thích bằng gọi hàm" in q_low:
+            return "plain"
+        return None
+    # tìm style khớp keyword
+    for style, kws in STYLE_KEYWORDS.items():
+        for kw in kws:
+            if kw.lower() in q_low:
+                # đảm bảo style hợp lệ
+                if style in AVAILABLE_STYLES:
+                    return style
+    return None
+
+def strip_style_instruction(question: str) -> str:
+    """Tách phần chỉ thị đổi phong cách khỏi câu hỏi để lấy nội dung thực cần trả lời.
+    Nếu câu chỉ là chỉ thị đổi phong cách không kèm câu hỏi thì trả về rỗng."""
+    if not question:
+        return question
+    q_low = question.lower()
+    for style, kws in STYLE_KEYWORDS.items():
+        for kw in kws:
+            if kw.lower() in q_low:
+                idx = q_low.find(kw.lower())
+                after_raw = question[idx + len(kw):]
+                after = after_raw.strip(" :,-.")
+                lower_after = after.lower()
+                for sep in [" và ", " rồi ", ", ", "; ", " và cho ", " và hãy ", "và ", "rồi ", ","]:
+                    if sep.strip() and sep.strip() in lower_after:
+                        sep_idx = lower_after.find(sep.strip())
+                        if sep_idx != -1:
+                            parts = after.split(sep.strip(), 1)
+                            if len(parts) > 1 and len(parts[1].strip()) > 5:
+                                return parts[1].strip()
+                        if sep in lower_after:
+                            parts = after.lower().split(sep.strip(), 1)
+                            orig_idx = after.lower().find(sep.strip())
+                            if orig_idx != -1:
+                                cand = after[orig_idx + len(sep.strip()):].strip()
+                                if len(cand) > 5:
+                                    return cand
+                if len(after) < 15 or lower_after.startswith("đi") or lower_after.startswith("nhé") or lower_after.startswith("nha"):
+                    return ""
+                return question
+    return question
+
+
+# ── Xã giao mở rộng ──
+_SOCIAL_PROFESSIONAL_HINTS = ["quy chế", "quy định", "quyết định", "thông báo", "tài liệu", "học viện", "kỹ thuật mật mã", "đào tạo", "khảo thí", "học bổng", "tốt nghiệp", "tín chỉ"]
+
+def is_social_question(question: str, history: list[dict] | None = None) -> bool:
+    """Nhận diện câu xã giao đời thường để đi nhánh không cần nguồn.
+    Chỉ cung cấp ngoài lề khi có nguồn chính xác hoặc kiến thức huấn luyện -> nhánh xã giao cho phép dùng kiến thức chung."""
+    if not ENABLE_SOCIAL:
+        return False
+    if not question or not question.strip():
+        return False
+    q_low = question.strip().lower()
+    # Nếu chứa từ chuyên môn rõ ràng thì ưu tiên chuyên môn, không coi là xã giao
+    for hint in _SOCIAL_PROFESSIONAL_HINTS:
+        if hint in q_low:
+            return False
+    # Kiểm tra allowlist
+    for kw in SOCIAL_ALLOWLIST:
+        if kw.lower() in q_low:
+            return True
+    # Các câu rất ngắn, không có từ chuyên môn, thường là chào hỏi
+    if len(q_low.split()) <= 4 and len(q_low) < 30:
+        # loại trừ câu ngắn nhưng là câu hỏi chuyên môn dạng "là gì?"
+        # nếu đã có lịch sử chuyên môn dài thì không coi là xã giao đơn thuần
+        if history and len(history) > 4:
+            # vẫn có thể là xã giao chen giữa, cho phép
+            pass
+        # nếu câu ngắn và không có từ chuyên môn, coi là xã giao
+        if not any(h in q_low for h in _SOCIAL_PROFESSIONAL_HINTS):
+            return True
+    return False
+
+def generate_social(question: str, history: list[dict] | None = None, summary: str | None = None, style: str | None = None) -> str:
+    """Sinh câu trả lời xã giao - mặc định casual, không cần nguồn, vẫn nhớ từ đầu phiên."""
+    effective_style = style or "casual"
+    if effective_style not in AVAILABLE_STYLES:
+        effective_style = "casual"
+    messages = build_social_messages(question, history, summary, style=effective_style)
+    temp = STYLE_TEMPERATURE.get(effective_style, 0.7)
+    try:
+        if LLM_BACKEND == "ollama":
+            return _call_ollama(messages, LLM_MODEL, GEN_MAX_TOKENS, LLM_THINK, temperature=temp)
+        else:
+            gen = _get_transformers_gen()
+            prompt = "\n\n".join(f"{m['role']}: {m['content']}" for m in messages)
+            out = gen(prompt, max_new_tokens=GEN_MAX_TOKENS, do_sample=False, return_full_text=False)
+            return out[0]["generated_text"].strip()
+    except Exception as e:
+        # Fallback khi Ollama chưa chạy: trả lời chào hỏi đơn giản, không cần LLM, để tránh Failed to fetch
+        q_low = (question or "").lower()
+        if any(kw in q_low for kw in ["xin chào", "chào bạn", "chào", "hello", "hi", "hey"]):
+            return "Xin chào! Mình khỏe, cảm ơn bạn đã hỏi thăm. Bạn cần mình hỗ trợ gì về quy chế, quy định hay thông tin nào khác không?"
+        if "khỏe" in q_low:
+            return "Mình khỏe, cảm ơn bạn! Bạn đang cần tìm hiểu thêm về vấn đề gì?"
+        if "cảm ơn" in q_low or "cam on" in q_low:
+            return "Không có gì, rất vui được giúp bạn! Bạn cần hỏi thêm gì nữa không?"
+        if "tạm biệt" in q_low or "bye" in q_low:
+            return "Tạm biệt bạn nhé! Hẹn gặp lại khi bạn cần hỗ trợ thêm."
+        if "bạn là ai" in q_low or "gioi thieu" in q_low:
+            return "Mình là trợ lý ảo của Học viện Kỹ thuật Mật mã, luôn sẵn sàng hỗ trợ bạn tra cứu quy chế, quy định và các thông tin liên quan."
+        # Fallback chung cho xã giao khác
+        return "Chào bạn! Mình ở đây để trò chuyện và hỗ trợ bạn. Bạn muốn hỏi về vấn đề gì?"

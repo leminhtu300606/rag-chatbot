@@ -28,3 +28,12 @@ Thumbs.db
 # chroma_db/
 # data/processed/.versions/
 # data/processed/.history.jsonl
+
+# Sessions - persistent chat sessions (không commit)
+data/sessions.json
+data/sessions.tmp
+
+# Node
+node_modules/
+package-lock.json
+package.json

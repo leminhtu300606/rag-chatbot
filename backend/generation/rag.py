@@ -14,8 +14,9 @@ from backend.config import (
     CONVERSATION_WINDOW,
     CONVERSATION_SUMMARY_THRESHOLD,
     CONVERSATION_MAX_HISTORY_CHARS,
+    DEFAULT_STYLE,
 )
-from backend.generation.generator import generate, generate_with_history, rewrite_query, summarize_history
+from backend.generation.generator import generate, generate_with_history, generate_social, is_social_question, rewrite_query, summarize_history, detect_style_change, strip_style_instruction
 from backend.indexing.retriever import retrieve
 
 from backend.generation.reranker import DEFAULT_RERANK_TOP_K, rerank
@@ -24,17 +25,18 @@ from backend.generation.reranker import DEFAULT_RERANK_TOP_K, rerank
 def _prepare_history(
     history: list[dict] | None,
 ) -> tuple[list[dict] | None, str | None]:
-    """Chuẩn hóa lịch sử hội thoại: cắt cửa sổ, cắt độ dài và tóm tắt khi vượt ngưỡng.
+    """Chuẩn hóa lịch sử hội thoại: nhớ từ đầu phiên, cân bằng tốc độ + chính xác.
 
+    - Giữ 8 turns gần nhất nguyên văn (600 chars) để suy luận chính xác.
+    - Phần cũ từ đầu phiên được nén thành tóm tắt để vẫn nhớ.
     Returns:
         (history_window, summary)
-        - history_window: danh sách message gần nhất sau khi cắt (tối đa CONVERSATION_WINDOW*2)
-        - summary: tóm tắt các turn cũ nếu có, None nếu không cần
+        - history_window: tối đa CONVERSATION_WINDOW*2 messages gần nhất
+        - summary: tóm tắt phần cũ từ đầu phiên nếu vượt ngưỡng, None nếu không cần
     """
     if not history:
         return None, None
 
-    # Chuẩn hóa và lọc message rỗng
     cleaned = []
     for m in history:
         if not isinstance(m, dict):
@@ -53,10 +55,13 @@ def _prepare_history(
     if not cleaned:
         return None, None
 
-    # Nếu vượt ngưỡng, tóm tắt phần cũ và chỉ giữ cửa sổ gần nhất
+    # Tính ngưỡng theo turns (2 messages = 1 turn)
+    threshold_msgs = CONVERSATION_SUMMARY_THRESHOLD * 2
+    window_size = CONVERSATION_WINDOW * 2
+
     summary = None
-    if len(cleaned) > CONVERSATION_SUMMARY_THRESHOLD:
-        window_size = CONVERSATION_WINDOW * 2  # mỗi turn ~2 messages
+    if len(cleaned) > threshold_msgs:
+        # Nhớ từ đầu phiên: tóm tắt toàn bộ phần cũ từ đầu đến trước cửa sổ gần nhất
         old_part = cleaned[:-window_size] if len(cleaned) > window_size else cleaned[: len(cleaned) // 2]
         if old_part:
             try:
@@ -64,9 +69,8 @@ def _prepare_history(
             except Exception:
                 summary = None
         cleaned = cleaned[-window_size:]
-
-    elif len(cleaned) > CONVERSATION_WINDOW * 2:
-        cleaned = cleaned[-(CONVERSATION_WINDOW * 2) :]
+    elif len(cleaned) > window_size:
+        cleaned = cleaned[-window_size:]
 
     return (cleaned if cleaned else None), summary
 
@@ -77,33 +81,55 @@ def answer(
     top_k: int = None,
     use_rerank: bool = False,
     rerank_k: int = None,
+    style: str | None = None,
 ) -> dict:
-    """Trả lời câu hỏi ở chế độ đơn lượt (single-turn).
+    """Trả lời câu hỏi ở chế độ đơn lượt (single-turn) - hỗ trợ xã giao."""
+    # Phát hiện đổi phong cách
+    detected_style = detect_style_change(question)
+    effective_style = detected_style or style or DEFAULT_STYLE
+    stripped = strip_style_instruction(question) if detected_style else question
+    if detected_style and not stripped:
+        return {
+            "answer": f"Đã đổi sang phong cách {effective_style}. Từ giờ mình sẽ trả lời theo phong cách này nhé.",
+            "sources": [],
+            "context": [],
+            "style": effective_style,
+        }
+    effective_question = stripped if stripped and stripped.strip() else question
 
-    Args:
-        question: câu hỏi người dùng
-        category: lọc theo category nếu có
-        top_k: số chunk cuối cùng đưa vào LLM (mặc định RETRIEVE_TOP_K / DEFAULT_RERANK_TOP_K)
-        use_rerank: có dùng cross-encoder rerank không
-        rerank_k: số chunk sau rerank
+    # Nhánh xã giao: không cần nguồn, dùng kiến thức huấn luyện, mặc định casual
+    if is_social_question(effective_question):
+        # Nếu chưa có style riêng, dùng casual cho xã giao
+        social_style = effective_style if effective_style in ["casual", "friendly", "humorous", "empathetic"] else "casual"
+        # Nếu phong cách hiện tại là formal nhưng câu xã giao thì vẫn dùng casual cho tự nhiên
+        if style is None and detected_style is None:
+            social_style = "casual"
+        else:
+            social_style = effective_style
+        text = generate_social(effective_question, history=None, summary=None, style=social_style)
+        return {
+            "answer": text,
+            "sources": [],
+            "context": [],
+            "style": social_style,
+        }
 
-    Returns:
-        {"answer": str, "sources": list[dict], "context": list[dict]}
-    """
     if top_k is None:
         top_k = DEFAULT_RERANK_TOP_K if (use_rerank and rerank) else RETRIEVE_TOP_K
     fetch_k = top_k * 3 if use_rerank and rerank else top_k
 
-    context = retrieve(question, category=category, top_k=fetch_k)
+    query_for_retrieval = effective_question
+    context = retrieve(query_for_retrieval, category=category, top_k=fetch_k)
 
     if use_rerank and rerank and context:
-        context = rerank(question, context, top_k=rerank_k if rerank_k is not None else top_k)
+        context = rerank(query_for_retrieval, context, top_k=rerank_k if rerank_k is not None else top_k)
 
-    text = generate(context, question)
+    text = generate(context, query_for_retrieval, style=effective_style)
     return {
         "answer": text,
         "sources": [c["metadata"] for c in context],
         "context": context,
+        "style": effective_style,
     }
 
 
@@ -114,41 +140,78 @@ def answer_with_history(
     top_k: int = None,
     use_rerank: bool = False,
     rerank_k: int = None,
+    style: str | None = None,
 ) -> dict:
-    """Trả lời có ngữ cảnh hội thoại (conversational).
+    """Trả lời có ngữ cảnh hội thoại (conversational) - hỗ trợ đổi phong cách qua câu tự nhiên."""
+    # Phát hiện đổi phong cách
+    detected_style = detect_style_change(question)
+    effective_style = detected_style or style or DEFAULT_STYLE
+    stripped = strip_style_instruction(question) if detected_style else question
+    # Nếu chỉ đổi phong cách không kèm câu hỏi thực -> trả lời xác nhận, vẫn nhớ từ đầu phiên
+    if detected_style and not stripped:
+        # Vẫn chuẩn bị history để nhớ, nhưng không cần retrieve
+        history_window, summary = _prepare_history(history)
+        # Tạo câu trả lời xác nhận theo phong cách mới (không cần nguồn)
+        confirm_context = []
+        # Dùng generate_with_history với context rỗng để LLM nói theo style mới
+        text = generate_with_history(confirm_context, f"Xác nhận đã đổi sang phong cách {effective_style}", history_window, summary, style=effective_style)
+        # Nếu LLM không trả lời đúng, fallback
+        if not text or "phong cách" not in text.lower():
+            text = f"Đã đổi sang phong cách {effective_style}. Từ giờ mình sẽ trả lời theo phong cách này nhé. Bạn cần hỏi gì tiếp?"
+        return {
+            "answer": text,
+            "sources": [],
+            "context": [],
+            "standalone_question": question,
+            "summary": summary,
+            "history_used": history_window,
+            "style": effective_style,
+        }
 
-    Luồng xử lý:
-      1. Chuẩn hóa lịch sử: cắt cửa sổ và tóm tắt nếu dài (_prepare_history)
-      2. Viết lại câu hỏi thành dạng độc lập để retrieval chính xác (rewrite_query)
-      3. Truy xuất và rerank bằng câu hỏi đã viết lại
-      4. Sinh câu trả lời bằng câu hỏi gốc + lịch sử + tóm tắt + context (generate_with_history)
+    # Dùng câu đã tách chỉ thị để xử lý tiếp
+    effective_question = stripped if stripped and stripped.strip() else question
 
-    Returns:
-        {"answer": str, "sources": list[dict], "context": list[dict],
-         "standalone_question": str, "summary": str|None, "history_used": list|None}
-    """
-    # Chuẩn bị cửa sổ lịch sử và tóm tắt
+    # Chuẩn bị cửa sổ lịch sử và tóm tắt (nhớ từ đầu phiên) - luôn cần dù là xã giao
     history_window, summary = _prepare_history(history)
 
-    # Viết lại câu hỏi để retrieval chính xác hơn
-    standalone_q = question
+    # Nhánh xã giao mở rộng: nếu câu là xã giao đời thường thì không cần nguồn, trả lời tự nhiên
+    # Chỉ cung cấp ngoài lề khi có nguồn chính xác hoặc kiến thức huấn luyện -> cho phép dùng generate_social
+    if is_social_question(effective_question, history):
+        # Chọn phong cách xã giao: mặc định casual, nếu người dùng đã chọn friendly/humorous thì giữ
+        social_style = effective_style
+        if effective_style not in ["casual", "friendly", "humorous", "empathetic", "plain", "simple"]:
+            # nếu đang là formal mà câu xã giao thì dùng casual cho tự nhiên
+            social_style = "casual"
+        text = generate_social(effective_question, history_window, summary, style=social_style)
+        return {
+            "answer": text,
+            "sources": [],
+            "context": [],
+            "standalone_question": effective_question,
+            "summary": summary,
+            "history_used": history_window,
+            "style": social_style,
+        }
+
+    # Viết lại câu hỏi để retrieval chính xác hơn (dùng câu đã tách)
+    standalone_q = effective_question
     if history_window:
         try:
-            standalone_q = rewrite_query(question, history_window)
+            standalone_q = rewrite_query(effective_question, history_window)
         except Exception:
-            standalone_q = question
+            standalone_q = effective_question
 
     if top_k is None:
         top_k = DEFAULT_RERANK_TOP_K if (use_rerank and rerank) else RETRIEVE_TOP_K
     fetch_k = top_k * 3 if use_rerank and rerank else top_k
 
-    query_for_retrieval = standalone_q if standalone_q and standalone_q.strip() else question
+    query_for_retrieval = standalone_q if standalone_q and standalone_q.strip() else effective_question
     context = retrieve(query_for_retrieval, category=category, top_k=fetch_k)
 
     if use_rerank and rerank and context:
         context = rerank(query_for_retrieval, context, top_k=rerank_k if rerank_k is not None else top_k)
 
-    text = generate_with_history(context, question, history_window, summary)
+    text = generate_with_history(context, effective_question, history_window, summary, style=effective_style)
 
     return {
         "answer": text,
@@ -157,4 +220,5 @@ def answer_with_history(
         "standalone_question": standalone_q,
         "summary": summary,
         "history_used": history_window,
+        "style": effective_style,
     }

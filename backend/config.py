@@ -21,7 +21,7 @@ PROCESSED_EXT = ".parquet"  # dinh dang du lieu huan luyen: parquet (thay jsonl)
 CHROMA_DIR = BASE_DIR / "chroma_db"
 INDEXED_MANIFEST = PROCESSED_DIR / ".indexed.json"
 
-EMBED_MODEL = "dangvantuan/vietnamese-embedding"
+EMBED_MODEL = "BAAI/bge-m3"
 
 LLM_BACKEND = "ollama"
 # qwen2.5:7b (~4.7GB) can ~8GB RAM/VRAM - can bang tot giua chat luong va tai nguyen
@@ -54,15 +54,16 @@ GEN_MAX_TOKENS = 512
 DEVICE = "cpu"
 
 # ── Hội thoại: quản lý ngữ cảnh ──
-# Số lượng turn gần nhất giữ nguyên trong prompt (mỗi turn = 1 user + 1 assistant)
-CONVERSATION_WINDOW = 6  # giu 6 cap hoi-dap gan nhat (~12 messages)
-CONVERSATION_SUMMARY_THRESHOLD = 12  # khi vuot 12 turns thi tom tat
-CONVERSATION_MAX_HISTORY_CHARS = 300  # cat moi message cu de tiet kiem token
+# Cân bằng: nhớ từ đầu phiên, tốc độ + chính xác, nói thẳng khi không đủ nguồn
+# Giữ 8 turns gần nhất nguyên văn (16 messages) + tóm tắt phần cũ từ đầu phiên
+CONVERSATION_WINDOW = 8  # giu 8 cap hoi-dap gan nhat (~16 messages) để nhớ ngữ cảnh dài
+CONVERSATION_SUMMARY_THRESHOLD = 10  # vuot 10 turns thì tóm tắt phần cũ từ đầu phiên
+CONVERSATION_MAX_HISTORY_CHARS = 600  # tăng từ 300 -> 600 để giữ chi tiết, tránh cắt cụt
 # Model dung cho rewrite/summarize: None = dung LLM_MODEL chinh, hoac chi dinh model nho hon
 REWRITE_MODEL = None  # vi du "qwen2.5:1.5b" de rewrite nhanh
 SUMMARY_MODEL = None
 REWRITE_MAX_TOKENS = 256
-SUMMARY_MAX_TOKENS = 256
+SUMMARY_MAX_TOKENS = 320  # tăng nhẹ để tóm tắt giữ được ý chính từ đầu phiên
 
 CATEGORY_ORDER = [
     "quyet_dinh",
@@ -71,3 +72,72 @@ CATEGORY_ORDER = [
     "tai_lieu_huong_dan",
     "thong_bao",
 ]
+
+# ── Phong cách trả lời: đổi được trong hội thoại bằng câu tự nhiên ──
+# Người dùng có thể nói "đổi sang giọng thân thiện", "giải thích đơn giản thôi", "không dùng kiểu gọi hàm", v.v.
+AVAILABLE_STYLES = [
+    "formal",       # hành chính, trang trọng
+    "friendly",     # thân thiện
+    "concise",      # ngắn gọn
+    "detailed",     # chi tiết
+    "simple",       # đơn giản dễ hiểu, không dùng thuật ngữ
+    "academic",     # học thuật
+    "casual",       # tự nhiên đời thường
+    "humorous",     # hài hước nhẹ
+    "empathetic",   # đồng cảm
+    "creative",     # sáng tạo
+    "bullet",       # gạch đầu dòng
+    "step_by_step", # từng bước
+    "plain",        # thuần túy, không gọi hàm/không kỹ thuật
+]
+DEFAULT_STYLE = "casual"
+# Gợi ý từ khóa để nhận diện đổi phong cách qua câu tự nhiên
+STYLE_KEYWORDS = {
+    "formal": ["hành chính", "trang trọng", "formal", "nghiêm túc", "chuẩn mực"],
+    "friendly": ["thân thiện", "friendly", "gần gũi", "ấm áp"],
+    "concise": ["ngắn gọn", "concise", "tóm tắt", "súc tích", "ngắn thôi"],
+    "detailed": ["chi tiết", "detailed", "đầy đủ", "cặn kẽ"],
+    "simple": ["đơn giản", "dễ hiểu", "simple", "dễ đọc", "phổ thông"],
+    "academic": ["học thuật", "academic", "nghiên cứu"],
+    "casual": ["tự nhiên", "đời thường", "casual", "thoải mái"],
+    "humorous": ["hài hước", "vui", "hài", "humorous", "vui nhộn"],
+    "empathetic": ["đồng cảm", "empathetic", "chia sẻ"],
+    "creative": ["sáng tạo", "creative", "mới mẻ"],
+    "bullet": ["gạch đầu dòng", "bullet", "dạng liệt kê", "liệt kê"],
+    "step_by_step": ["từng bước", "step by step", "theo bước", "quy trình"],
+    "plain": ["không gọi hàm", "không dùng hàm", "không kỹ thuật", "plain", "đừng dùng kiểu gọi hàm", "không giải thích bằng gọi hàm", "không dùng kiểu gọi hàm"],
+}
+# Nhiệt độ gợi ý theo phong cách (dùng cho Ollama options)
+STYLE_TEMPERATURE = {
+    "formal": 0.2,
+    "friendly": 0.6,
+    "concise": 0.3,
+    "detailed": 0.4,
+    "simple": 0.5,
+    "academic": 0.2,
+    "casual": 0.7,
+    "humorous": 0.8,
+    "empathetic": 0.6,
+    "creative": 0.8,
+    "bullet": 0.3,
+    "step_by_step": 0.3,
+    "plain": 0.5,
+}
+
+# ── Xã giao mở rộng: chỉ cung cấp thông tin ngoài lề khi có nguồn chính xác hoặc kiến thức huấn luyện ──
+# Mặc định trả lời theo giọng đời thường (casual)
+ENABLE_SOCIAL = True
+SOCIAL_ALLOWLIST = [
+    "xin chào", "chào bạn", "chào", "hello", "hi", "hey",
+    "bạn khỏe không", "khỏe không", "khoe khong", "bạn khỏe", "khỏe chứ",
+    "cảm ơn", "cam on", "cám ơn", "thank",
+    "tạm biệt", "bye", "goodbye",
+    "bạn là ai", "ban la ai", "giới thiệu", "gioi thieu",
+    "hôm nay thế nào", "hom nay the nao", "thời tiết", "thoi tiet",
+    "kể chuyện", "ke chuyen", "đùa", "dua", "vui", "haha", "hihi",
+    "giúp tôi", "giup toi", "bạn có thể", "ban co the",
+    "tên bạn", "ten ban", "bạn tên gì",
+    "chúc", "chuc", "buổi sáng", "buoi sang", "buổi tối", "buoi toi",
+]
+# Các chủ đề xã giao được phép trả lời bằng kiến thức chung, ngoài ra phải có nguồn
+SOCIAL_TOPICS = ["chào hỏi", "sức khỏe", "cảm ơn", "tạm biệt", "giới thiệu", "thời tiết cơ bản", "kể chuyện ngắn", "đùa nhẹ", "hỏi han đời thường"]
