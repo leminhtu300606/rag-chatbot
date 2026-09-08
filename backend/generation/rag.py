@@ -21,6 +21,15 @@ from backend.indexing.retriever import retrieve
 
 from backend.generation.reranker import DEFAULT_RERANK_TOP_K, rerank
 
+try:
+    from backend.generation.calculator import is_math_question, is_math_request_steps, calculate, is_comparison_question, compare_real_numbers
+except Exception:
+    is_math_question = lambda *a, **kw: False
+    is_math_request_steps = lambda *a, **kw: False
+    calculate = lambda *a, **kw: {"success": False, "error": "calculator not loaded"}
+    is_comparison_question = lambda *a, **kw: False
+    compare_real_numbers = lambda *a, **kw: {"success": False, "error": "comparator not loaded"}
+
 
 def _prepare_history(
     history: list[dict] | None,
@@ -83,8 +92,9 @@ def answer(
     use_rerank: bool = False,
     rerank_k: int = None,
     style: str | None = None,
+    last_math_result: str | None = None,
 ) -> dict:
-    """Trả lời câu hỏi ở chế độ đơn lượt (single-turn) - hỗ trợ xã giao."""
+    """Trả lời câu hỏi ở chế độ đơn lượt (single-turn) - hỗ trợ xã giao và toán học."""
     # Phát hiện đổi phong cách
     detected_style = detect_style_change(question)
     effective_style = detected_style or style or DEFAULT_STYLE
@@ -97,6 +107,87 @@ def answer(
             "style": effective_style,
         }
     effective_question = stripped if stripped and stripped.strip() else question
+
+    # Nhánh so sánh số thực: ưu tiên trước toán học thường, trả lời tự nhiên không kiểu gọi hàm
+    if is_comparison_question(effective_question, None, last_math_result):
+        want_steps = is_math_request_steps(effective_question, effective_style)
+        # plain: không hiện steps kiểu gọi hàm
+        if effective_style == "plain":
+            want_steps = False
+        comp = compare_real_numbers(effective_question, last_result=last_math_result, style=effective_style, want_steps=want_steps)
+        if comp.get("success"):
+            ans = comp.get("answer")
+            expr = comp.get("expression") or effective_question
+            # Nếu yêu cầu steps và có steps thì nối tự nhiên (không lộ hàm)
+            steps = comp.get("steps")
+            if want_steps and steps and effective_style != "plain":
+                ans = steps + ("\n" + ans if ans not in steps else "")
+            return {
+                "answer": ans,
+                "sources": [],
+                "context": [],
+                "style": effective_style,
+                "standalone_question": expr,
+                "history_used": None,
+                "summary": None,
+                "math_result": comp.get("left") + (" " + comp.get("op") + " " if comp.get("op") != "compare" else " so với ") + comp.get("right") if comp.get("op") else None,
+                "math_expression": expr,
+                "comparison_result": comp.get("result"),
+                "comparison_answer": ans,
+                "comparison_left": comp.get("left"),
+                "comparison_right": comp.get("right"),
+            }
+        else:
+            if comp.get("expression"):
+                return {
+                    "answer": f"Không so sánh được `{comp.get('expression','')}`. Lỗi: {comp.get('error','không rõ')}. Vui lòng kiểm tra lại hai số cần so sánh.",
+                    "sources": [],
+                    "context": [],
+                    "style": effective_style,
+                    "standalone_question": comp.get("expression"),
+                    "history_used": None,
+                    "summary": None,
+                }
+
+    # Nhánh toán học: ưu tiên trước xã giao, độ chính xác cao Decimal prec=50, hỗ trợ chữ->số và last_result
+    if is_math_question(effective_question, None, last_math_result):
+        want_steps = is_math_request_steps(effective_question, effective_style)
+        calc = calculate(effective_question, last_result=last_math_result, want_steps=want_steps, style=effective_style)
+        if calc.get("success"):
+            expr = calc.get("expression") or effective_question
+            res = calc.get("result")
+            steps = calc.get("steps")
+            if want_steps and steps:
+                answer_text = steps
+            else:
+                # plain: không gọi hàm, trả lời tự nhiên
+                if effective_style == "plain":
+                    answer_text = f"Kết quả là {res}."
+                else:
+                    answer_text = f"{expr} = {res}"
+            return {
+                "answer": answer_text,
+                "sources": [],
+                "context": [],
+                "style": effective_style,
+                "standalone_question": expr,
+                "history_used": None,
+                "summary": None,
+                "math_result": res,
+                "math_expression": expr,
+            }
+        else:
+            # Nếu trích được biểu thức mà lỗi (chia 0...) thì báo lỗi rõ ràng, không rơi sang RAG để tránh hallucinate
+            if calc.get("expression"):
+                return {
+                    "answer": f"Không tính được phép toán `{calc.get('expression','')}`. Lỗi: {calc.get('error','không rõ')}. Vui lòng kiểm tra lại biểu thức.",
+                    "sources": [],
+                    "context": [],
+                    "style": effective_style,
+                    "standalone_question": calc.get("expression"),
+                    "history_used": None,
+                    "summary": None,
+                }
 
     # Nhánh xã giao: không cần nguồn, dùng kiến thức huấn luyện, mặc định casual
     if is_social_question(effective_question):
@@ -142,8 +233,9 @@ def answer_with_history(
     use_rerank: bool = False,
     rerank_k: int = None,
     style: str | None = None,
+    last_math_result: str | None = None,
 ) -> dict:
-    """Trả lời có ngữ cảnh hội thoại (conversational) - hỗ trợ đổi phong cách qua câu tự nhiên."""
+    """Trả lời có ngữ cảnh hội thoại (conversational) - hỗ trợ đổi phong cách qua câu tự nhiên và toán học."""
     # Phát hiện đổi phong cách
     detected_style = detect_style_change(question)
     effective_style = detected_style or style or DEFAULT_STYLE
@@ -202,6 +294,85 @@ def answer_with_history(
             "history_used": history_window,
             "style": effective_style,
         }
+
+    # Nhánh so sánh số thực (hội thoại) - ưu tiên trước toán học, trả lời tự nhiên không kiểu gọi hàm
+    if is_comparison_question(effective_question, history_window if history_window else history, last_math_result):
+        want_steps = is_math_request_steps(effective_question, effective_style)
+        if effective_style == "plain":
+            want_steps = False
+        comp = compare_real_numbers(effective_question, last_result=last_math_result, style=effective_style, want_steps=want_steps)
+        if comp.get("success"):
+            ans = comp.get("answer")
+            expr = comp.get("expression") or effective_question
+            steps = comp.get("steps")
+            if want_steps and steps and effective_style != "plain":
+                ans = steps + ("\n" + ans if ans not in steps else "")
+            return {
+                "answer": ans,
+                "sources": [],
+                "context": [],
+                "standalone_question": expr,
+                "summary": summary,
+                "history_used": history_window,
+                "style": effective_style,
+                "math_result": comp.get("left") + (" " + comp.get("op") + " " if comp.get("op") != "compare" else " so với ") + comp.get("right") if comp.get("op") else None,
+                "math_expression": expr,
+                "comparison_result": comp.get("result"),
+                "comparison_answer": ans,
+                "comparison_left": comp.get("left"),
+                "comparison_right": comp.get("right"),
+            }
+        else:
+            if comp.get("expression") or comp.get("error") != "không trích được cặp số để so sánh":
+                # Chỉ báo lỗi nếu có expression, tránh nhầm với RAG đơn số
+                if comp.get("expression"):
+                    return {
+                        "answer": f"Không so sánh được `{comp.get('expression','')}`. Lỗi: {comp.get('error','không rõ')}. Vui lòng kiểm tra lại hai số cần so sánh.",
+                        "sources": [],
+                        "context": [],
+                        "standalone_question": comp.get("expression"),
+                        "summary": summary,
+                        "history_used": history_window,
+                        "style": effective_style,
+                    }
+
+    # Nhánh toán học: hỗ trợ toàn bộ ký tự, chữ->số, nhớ last_result, chỉ hiện steps khi yêu cầu
+    if is_math_question(effective_question, history_window if history_window else history, last_math_result):
+        want_steps = is_math_request_steps(effective_question, effective_style)
+        calc = calculate(effective_question, last_result=last_math_result, want_steps=want_steps, style=effective_style)
+        if calc.get("success"):
+            expr = calc.get("expression") or effective_question
+            res = calc.get("result")
+            steps = calc.get("steps")
+            if want_steps and steps:
+                answer_text = steps
+            else:
+                if effective_style == "plain":
+                    answer_text = f"Kết quả là {res}."
+                else:
+                    answer_text = f"{expr} = {res}"
+            return {
+                "answer": answer_text,
+                "sources": [],
+                "context": [],
+                "standalone_question": expr,
+                "summary": summary,
+                "history_used": history_window,
+                "style": effective_style,
+                "math_result": res,
+                "math_expression": expr,
+            }
+        else:
+            if calc.get("expression"):
+                return {
+                    "answer": f"Không tính được phép toán `{calc.get('expression','')}`. Lỗi: {calc.get('error','không rõ')}. Vui lòng kiểm tra lại biểu thức.",
+                    "sources": [],
+                    "context": [],
+                    "standalone_question": calc.get("expression"),
+                    "summary": summary,
+                    "history_used": history_window,
+                    "style": effective_style,
+                }
 
     # Nhánh xã giao mở rộng: nếu câu là xã giao đời thường thì không cần nguồn, trả lời tự nhiên
     # Chỉ cung cấp ngoài lề khi có nguồn chính xác hoặc kiến thức huấn luyện -> cho phép dùng generate_social

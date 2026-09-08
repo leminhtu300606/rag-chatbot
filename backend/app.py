@@ -128,6 +128,7 @@ def _load_sessions():
                         v.setdefault("summary", None)
                         v.setdefault("title", None)
                         v.setdefault("style", cfg.DEFAULT_STYLE)
+                        v.setdefault("last_math_result", None)
                         v.setdefault("created_at", time.time())
                         v.setdefault("updated_at", time.time())
                         # chuẩn hóa history
@@ -168,7 +169,7 @@ def _get_or_create_session(session_id: Optional[str], title: Optional[str] = Non
         created = False
         with _sessions_lock:
             if sid not in _sessions:
-                _sessions[sid] = {"history": [], "summary": None, "title": title, "style": style or cfg.DEFAULT_STYLE, "created_at": time.time(), "updated_at": time.time()}
+                _sessions[sid] = {"history": [], "summary": None, "title": title, "style": style or cfg.DEFAULT_STYLE, "last_math_result": None, "created_at": time.time(), "updated_at": time.time()}
                 created = True
             else:
                 if title and not _sessions[sid].get("title"):
@@ -176,22 +177,24 @@ def _get_or_create_session(session_id: Optional[str], title: Optional[str] = Non
                 if style and _sessions[sid].get("style") != style:
                     # nếu caller truyền style mới thì cập nhật
                     _sessions[sid]["style"] = style
+                # đảm bảo field last_math_result
+                _sessions[sid].setdefault("last_math_result", None)
         if created:
             _save_sessions()
         return sid
     # tao moi
     sid = str(uuid.uuid4())
     with _sessions_lock:
-        _sessions[sid] = {"history": [], "summary": None, "title": title, "style": style or cfg.DEFAULT_STYLE, "created_at": time.time(), "updated_at": time.time()}
+        _sessions[sid] = {"history": [], "summary": None, "title": title, "style": style or cfg.DEFAULT_STYLE, "last_math_result": None, "created_at": time.time(), "updated_at": time.time()}
     _save_sessions()
     return sid
 
-def _append_to_session(session_id: str, user_q: str, assistant_a: str, summary: Optional[str] = None, style: Optional[str] = None):
+def _append_to_session(session_id: str, user_q: str, assistant_a: str, summary: Optional[str] = None, style: Optional[str] = None, last_math_result: Optional[str] = None):
     need_save = False
     with _sessions_lock:
         sess = _sessions.get(session_id)
         if not sess:
-            _sessions[session_id] = {"history": [], "summary": summary, "title": None, "style": style or cfg.DEFAULT_STYLE, "created_at": time.time(), "updated_at": time.time()}
+            _sessions[session_id] = {"history": [], "summary": summary, "title": None, "style": style or cfg.DEFAULT_STYLE, "last_math_result": last_math_result, "created_at": time.time(), "updated_at": time.time()}
             sess = _sessions[session_id]
             need_save = True
         sess["history"].append({"role": "user", "content": user_q})
@@ -200,6 +203,8 @@ def _append_to_session(session_id: str, user_q: str, assistant_a: str, summary: 
             sess["summary"] = summary
         if style and style in cfg.AVAILABLE_STYLES:
             sess["style"] = style
+        if last_math_result is not None:
+            sess["last_math_result"] = str(last_math_result)
         # tự đặt title từ câu hỏi đầu tiên nếu chưa có
         if not sess.get("title") and user_q:
             sess["title"] = user_q.strip()[:50]
@@ -236,6 +241,8 @@ class ChatResponse(BaseModel):
     summary: Optional[str] = None
     history_used: Optional[List[Dict[str, Any]]] = None
     style: Optional[str] = None  # phong cách hiện tại của phiên
+    math_result: Optional[str] = None
+    math_expression: Optional[str] = None
 
 # --- Helpers ---
 def _get_stats():
@@ -302,6 +309,7 @@ async def get_session(session_id: str):
             "summary": sess.get("summary"),
             "title": sess.get("title"),
             "style": sess.get("style", cfg.DEFAULT_STYLE),
+            "last_math_result": sess.get("last_math_result"),
             "created_at": sess.get("created_at"),
             "updated_at": sess.get("updated_at"),
             "turns": len(sess["history"]) // 2,
@@ -334,6 +342,7 @@ async def list_sessions():
                 "created_at": v.get("created_at"),
                 "summary": v.get("summary"),
                 "style": v.get("style", cfg.DEFAULT_STYLE),
+                "last_math_result": v.get("last_math_result"),
             }
             for sid, v in sessions
         ],
@@ -356,6 +365,7 @@ async def create_session(req: CreateSessionRequest = None):
             "session_id": sid,
             "title": sess.get("title"),
             "style": sess.get("style", cfg.DEFAULT_STYLE),
+            "last_math_result": sess.get("last_math_result"),
             "created_at": sess.get("created_at"),
             "updated_at": sess.get("updated_at"),
             "history": sess.get("history", []),
@@ -385,11 +395,16 @@ async def chat(req: ChatRequest):
         raise HTTPException(status_code=400, detail=f"Category khong hop le. Chon trong: {cfg.CATEGORY_ORDER}")
 
     # Kiem tra co data truoc khi goi LLM (tranh goi Ollama khi chua co data)
-    # Nhưng với câu xã giao hoặc recall lịch sử thì không cần data, cho phép trả lời ngay
+    # Nhưng với câu xã giao, recall lịch sử, toán học hoặc so sánh thì không cần data, cho phép trả lời ngay
     is_social_early = False
     try:
         from backend.generation.generator import is_social_question, is_history_recall_question
-        is_social_early = is_social_question(req.question, None) or is_history_recall_question(req.question)
+        from backend.generation.calculator import is_math_question, is_comparison_question
+        _lr_early = None
+        if req.session_id and req.session_id.strip():
+            with _sessions_lock:
+                _lr_early = _sessions.get(req.session_id.strip(), {}).get("last_math_result")
+        is_social_early = is_social_question(req.question, None) or is_history_recall_question(req.question) or is_math_question(req.question, None, _lr_early) or is_comparison_question(req.question, None, _lr_early)
     except Exception:
         pass
     if not is_social_early:
@@ -509,6 +524,12 @@ async def chat(req: ChatRequest):
         if not effective_style:
             effective_style = session_style or cfg.DEFAULT_STYLE
 
+        # Lấy last_math_result để phục vụ "nó + 2" hoặc "cộng thêm 5"
+        last_math_result = None
+        if session_id:
+            with _sessions_lock:
+                last_math_result = _sessions.get(session_id, {}).get("last_math_result")
+
         # Goi RAG tuong ung (truyền phong cách)
         if effective_history:
             from backend.generation.rag import answer_with_history
@@ -519,17 +540,58 @@ async def chat(req: ChatRequest):
                 top_k=req.top_k,
                 use_rerank=req.use_rerank,
                 style=effective_style,
+                last_math_result=last_math_result,
             )
             # Cập nhật style từ kết quả nếu có (phát hiện đổi phong cách)
             final_style = res.get("style", effective_style)
-            # Lưu vào session sau khi có kết quả (kèm style và summary)
+            # Xử lý so sánh trước toán học: giữ last_math_result cũ (không ghi đè bằng biểu thức so sánh)
+            if "comparison_answer" in res:
+                comp_math_res = res.get("math_result")
+                if session_id:
+                    _append_to_session(session_id, req.question, res["answer"], res.get("summary"), style=final_style, last_math_result=None)
+                    with _sessions_lock:
+                        if session_id in _sessions and final_style in cfg.AVAILABLE_STYLES:
+                            _sessions[session_id]["style"] = final_style
+                    _save_sessions()
+                return ChatResponse(
+                    answer=res["answer"],
+                    sources=[],
+                    context=[] if req.show_context else None,
+                    session_id=session_id,
+                    standalone_question=res.get("math_expression") or res.get("standalone_question"),
+                    summary=res.get("summary"),
+                    history_used=res.get("history_used"),
+                    style=final_style,
+                    math_result=comp_math_res,
+                    math_expression=res.get("math_expression") or res.get("standalone_question"),
+                )
+            # Lưu vào session sau khi có kết quả (kèm style, summary và last_math_result nếu là toán)
+            math_res = res.get("math_result")
             if session_id:
-                _append_to_session(session_id, req.question, res["answer"], res.get("summary"), style=final_style)
+                _append_to_session(session_id, req.question, res["answer"], res.get("summary"), style=final_style, last_math_result=math_res if math_res is not None else None)
                 # đảm bảo session style đồng bộ
                 with _sessions_lock:
                     if session_id in _sessions and final_style in cfg.AVAILABLE_STYLES:
                         _sessions[session_id]["style"] = final_style
+                    # nếu là toán học, cập nhật last_math_result ngay (tránh bị _append None ghi đè)
+                    if math_res is not None and session_id in _sessions:
+                        _sessions[session_id]["last_math_result"] = str(math_res)
                 _save_sessions()
+
+            # Toán học: trả về ngay không cần context, hỗ trợ độ chính xác cao
+            if math_res is not None:
+                return ChatResponse(
+                    answer=res["answer"],
+                    sources=[],
+                    context=[] if req.show_context else None,
+                    session_id=session_id,
+                    standalone_question=res.get("math_expression") or res.get("standalone_question"),
+                    summary=res.get("summary"),
+                    history_used=res.get("history_used"),
+                    style=final_style,
+                    math_result=math_res,
+                    math_expression=res.get("math_expression") or res.get("standalone_question"),
+                )
 
             if not res.get("context"):
                 # Trường hợp chỉ đổi phong cách không cần context, vẫn trả về style
@@ -566,17 +628,54 @@ async def chat(req: ChatRequest):
                 style=final_style,
             )
         else:
-            # Chế độ đơn lượt (không dùng lịch sử)
+            # Chế độ đơn lượt (không dùng lịch sử) - vẫn hỗ trợ toán học với last_math_result
             from backend.generation.rag import answer
+            # last_math_result đã lấy ở trên, dùng lại
             res = answer(
                 question=req.question,
                 category=req.category,
                 top_k=req.top_k,
                 use_rerank=req.use_rerank,
                 style=effective_style,
+                last_math_result=last_math_result if 'last_math_result' in locals() else None,
             )
             final_style = res.get("style", effective_style)
+            # So sánh đơn lượt: không ghi đè last_math_result bằng biểu thức so sánh
+            if "comparison_answer" in res:
+                comp_math_res = res.get("math_result")
+                if session_id:
+                    _append_to_session(session_id, req.question, res["answer"], style=final_style, last_math_result=None)
+                    _save_sessions()
+                return ChatResponse(
+                    answer=res["answer"],
+                    sources=[],
+                    context=[] if req.show_context else None,
+                    session_id=session_id,
+                    standalone_question=res.get("math_expression") or res.get("standalone_question"),
+                    style=final_style,
+                    math_result=comp_math_res,
+                    math_expression=res.get("math_expression") or res.get("standalone_question"),
+                )
+            math_res_single = res.get("math_result")
             if not res.get("context"):
+                # Nếu là toán học hoặc social/style thì vẫn trả về ngay (không cần context)
+                if res.get("math_result") is not None:
+                    if session_id:
+                        _append_to_session(session_id, req.question, res["answer"], style=final_style, last_math_result=math_res_single)
+                        with _sessions_lock:
+                            if session_id in _sessions:
+                                _sessions[session_id]["last_math_result"] = str(math_res_single)
+                        _save_sessions()
+                    return ChatResponse(
+                        answer=res["answer"],
+                        sources=[],
+                        context=[] if req.show_context else None,
+                        session_id=session_id,
+                        standalone_question=res.get("math_expression") or res.get("standalone_question"),
+                        style=final_style,
+                        math_result=math_res_single,
+                        math_expression=res.get("math_expression") or res.get("standalone_question"),
+                    )
                 # Nếu chỉ đổi phong cách
                 if res.get("style") and not res.get("context"):
                     # trả về luôn nếu có answer dù không có context (trường hợp đổi style)
@@ -602,11 +701,19 @@ async def chat(req: ChatRequest):
                 context = res.get("context", [])
 
             # Van luu vao session neu co session_id du la single-turn
+            # Nếu là toán học mà chưa được xử lý early-return (hiếm), vẫn lưu last_math_result
+            # So sánh không ghi đè last_math_result (giữ số trước đó cho "nó")
+            if "comparison_answer" in res:
+                _math_single_tail = None
+            else:
+                _math_single_tail = res.get("math_result")
             if session_id:
-                _append_to_session(session_id, req.question, res["answer"], style=final_style)
+                _append_to_session(session_id, req.question, res["answer"], style=final_style, last_math_result=_math_single_tail if _math_single_tail is not None else None)
                 with _sessions_lock:
                     if session_id in _sessions and final_style in cfg.AVAILABLE_STYLES:
                         _sessions[session_id]["style"] = final_style
+                    if _math_single_tail is not None and session_id in _sessions:
+                        _sessions[session_id]["last_math_result"] = str(_math_single_tail)
                 _save_sessions()
 
             return ChatResponse(
@@ -614,7 +721,10 @@ async def chat(req: ChatRequest):
                 sources=res.get("sources", []),
                 context=context,
                 session_id=session_id,
+                standalone_question=res.get("math_expression") or res.get("standalone_question"),
                 style=final_style,
+                math_result=res.get("math_result"),
+                math_expression=res.get("math_expression"),
             )
     except HTTPException:
         raise

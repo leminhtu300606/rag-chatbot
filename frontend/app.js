@@ -63,6 +63,37 @@ function isSocialFrontend(q){
   // Chỉ xã giao nếu khớp allowlist ở trên, không tự động true cho câu ngắn
   return false;
 }
+function isMathFrontend(q){
+  if(!q) return false;
+  const low = q.toLowerCase();
+  // So sánh số thực: lớn hơn/nhỏ hơn/bằng/so sánh + số
+  const cmpWords = ["lớn hơn","lon hon","nhỏ hơn","nho hon","bé hơn","be hon","bằng nhau","bang nhau","bằng","bang","không bằng","khong bang","khác","khac","so sánh","so sanh","so với","so voi"];
+  for(const w of cmpWords) if(low.includes(w) && /\d/.test(low)) return true;
+  // Ký hiệu so sánh
+  if(/\d\s*(>=|<=|==|!=|>|<|=)\s*\d/.test(low)) return true;
+  if(/≥|≤|≠/.test(q) && /\d/.test(q)) return true;
+  // VN chữ + so sánh
+  const vnNum = ["không","khong","một","mot","hai","ba","bốn","bon","năm","nam","sáu","sau","bảy","bay","tám","tam","chín","chin","mười","muoi","mươi","trăm","tram","nghìn","nghin","triệu","trieu","tỷ","ty"];
+  let hasVnNum = false;
+  for(const w of vnNum) if(low.includes(w)) { hasVnNum = true; break; }
+  if(hasVnNum && cmpWords.some(w=>low.includes(w))) return true;
+  // Nếu là xã giao/recall thì không phải toán
+  // Check toán học: chữ -> số, ký tự toán học toàn bộ
+  const mathWords = ["cộng","cong","trừ","tru","nhân","nhan","chia","mũ","mu","lũy thừa","luy thua","căn","can","bình phương","binh phuong","lập phương","lap phuong","phần trăm","phan tram","giai thừa","giai thua","log","ln","sin","cos","tan","sqrt","cbrt","exp","phẩy","phay","chấm","cham"];
+  for(const w of mathWords) if(low.includes(w) && /\d/.test(low)) return true;
+  for(const w of mathWords) if(low.includes(w) && low.includes("kết quả") || low.includes("ket qua")) return true;
+  // Ký tự toán học đầy đủ (bao gồm × ÷ ! và dấu phẩy thập phân VN)
+  if(/\d\s*[\+\-\*/%×÷^\.]+\s*\d/.test(low)) return true;
+  if(/\d\s*[\+\-\*/%×÷]\s*\d/.test(q)) return true;
+  if(/\d\s*!\s*($|[^\d])/.test(q)) return true;
+  if(/\(\s*\d/.test(q) && /\d\s*\)/.test(q)) return true;
+  if(/sqrt|cbrt|log|sin|cos|tan|factorial|pi|e/.test(low)) return true;
+  if(hasVnNum && mathWords.some(w=>low.includes(w))) return true;
+  // "tính" + số
+  if((low.includes("tính")||low.includes("tinh")) && /\d/.test(low)) return true;
+  if(hasVnNum && (low.includes("tính")||low.includes("tinh"))) return true;
+  return false;
+}
 
 function generateId(){
   try{
@@ -704,7 +735,10 @@ async function send(){
     const bubble=placeholder.querySelector(".bubble");
     const histInfo = j.history_used ? ` • hist:${j.history_used.length/2|0}` : "";
     const rewriteBadge = j.standalone_question && j.standalone_question !== q ? `<span class="tool" title="${escapeHtml(j.standalone_question)}">🔁 đã rewrite</span>` : "";
-    bubble.innerHTML=`<span class="answer-text"></span><div class="meta"><span class="tool">✅ ${j.sources.length} nguồn</span><span class="tool">parquet • rerank top3${histInfo}</span>${rewriteBadge}</div>`;
+    const isMath = j.math_result !== undefined && j.math_result !== null;
+    const mathBadge = isMath ? `<span class="tool" title="${escapeHtml(j.math_expression||j.standalone_question||"")} = ${escapeHtml(j.math_result)}">🧮 ${escapeHtml(j.math_expression||j.standalone_question||"")} = ${escapeHtml(j.math_result)}</span>` : "";
+    const sourceBadge = isMath ? `<span class="tool">🧮 calculator • Decimal prec=50</span>` : `<span class="tool">✅ ${j.sources.length} nguồn</span>`;
+    bubble.innerHTML=`<span class="answer-text"></span><div class="meta">${sourceBadge}<span class="tool">parquet • rerank top3${histInfo}</span>${mathBadge}${rewriteBadge}</div>`;
      if(j.sources && j.sources.length){
       sourcesEl.innerHTML=j.sources.map(s=>{
         const sec=(s.section||"").trim();
@@ -726,7 +760,10 @@ async function send(){
       const rp=$("#right-panel"); if(rp) rp.style.display="flex";
     }else sourcesEl.innerHTML='<p class="hint">Không có nguồn.</p>';
 
-    if (j.standalone_question && j.standalone_question !== q) {
+    if (j.math_result !== undefined && j.math_result !== null) {
+      rewriteInfo.textContent = `🧮 ${j.math_expression||j.standalone_question} = ${j.math_result} • Decimal prec=50`;
+      rewriteInfo.classList.remove("hidden");
+    } else if (j.standalone_question && j.standalone_question !== q) {
       rewriteInfo.textContent = `🔁 Rewrite: "${q}" → "${j.standalone_question}"`;
       rewriteInfo.classList.remove("hidden");
     } else {
@@ -804,6 +841,41 @@ async function send(){
       isLoading=false; if(sendBtn) sendBtn.disabled=false; if(messages) messages.scrollTop=messages.scrollHeight;
       updateHistoryBadge();
       return;
+    }
+    if(isNetErr && isMathFrontend(q)){
+      // Offline calculator fallback đơn giản (chỉ +-*/ và ngoặc)
+      let fallback = null;
+      try{
+        // Chuẩn hoá cơ bản cho offline: giữ digits và + - * / % ( ) .
+        let expr = q.replace(/[×]/g,"*").replace(/[÷]/g,"/").replace(/[,]/g,".").replace(/[^0-9\.\+\-\*/%\(\) ]/g," ").replace(/\s+/g," ").trim();
+        // Thử eval an toàn: chỉ cho phép chars số và +-*/%()
+        if(/^[0-9\.\+\-\*/%\(\) ]+$/.test(expr) && /\d/.test(expr) && /[\+\-\*/%]/.test(expr)){
+          // Chặn --, ** thừa
+          const val = Function('"use strict"; return ('+expr+')')();
+          if(typeof val === 'number' && isFinite(val)){
+            fallback = `${expr} = ${val}`;
+          }
+        }
+      }catch(e){}
+      if(fallback){
+        bubble.innerHTML=`<span class="answer-text"></span><div class="meta"><span class="tool">🧮 calculator</span><span class="tool">offline fallback</span></div>`;
+        conversation.push({role:"user", content:q});
+        conversation.push({role:"assistant", content:fallback});
+        if(activeSessionId && sessionsMap[activeSessionId]){
+          sessionsMap[activeSessionId].conversation = conversation.slice(-60);
+          sessionsMap[activeSessionId].updatedAt = Date.now();
+          saveSessionsMap(sessionsMap);
+          renderSessionListLocal();
+        }
+        if(rewriteInfo){ rewriteInfo.textContent = `🧮 Offline: ${fallback}`; rewriteInfo.classList.remove("hidden"); }
+        setStatus("Đang gõ...");
+        const answerEl = bubble.querySelector(".answer-text");
+        await typeWriterEffect(answerEl, fallback, TYPEWRITER_SPEED);
+        setStatus("");
+        isLoading=false; if(sendBtn) sendBtn.disabled=false; if(messages) messages.scrollTop=messages.scrollHeight;
+        updateHistoryBadge();
+        return;
+      }
     }
     if(isNetErr){
       bubble.innerHTML=`❌ <b>Lỗi kết nối:</b> Không kết nối được máy chủ ở <code>http://localhost:8000</code>. Hãy kiểm tra bạn đang chạy <code>uvicorn backend.app:app --port 8000</code> và Ollama đang chạy.<div class="meta">${escapeHtml(msg)}</div>`;
