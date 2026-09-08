@@ -260,9 +260,65 @@ def rewrite_query(question: str, history: list[dict] | None) -> str:
             if rewritten.lower().startswith(prefix):
                 rewritten = rewritten[len(prefix) :].strip()
         if not rewritten or len(rewritten) < 3:
-            return question
+            raise ValueError("rewrite too short")
+        # Nếu rewrite vẫn chứa đại từ mơ hồ thì coi như chưa thành công -> fallback heuristic
+        low_re = rewritten.lower()
+        if any(p.strip() in low_re for p in [" nó ", " cái đó", " cái này", " trong đó", " ở trên"]):
+            raise ValueError("rewrite still ambiguous")
         return rewritten
     except Exception:
+        # Fallback heuristic: thay đại từ "nó", "cái đó"... bằng thực thể từ lịch sử đầu phiên để không mất câu đầu
+        try:
+            q_low = question.strip().lower()
+            # Tìm câu hỏi người dùng gần nhất có nội dung cụ thể (ưu tiên câu đầu tiên)
+            last_user_q = None
+            for m in reversed(history):
+                if m.get("role") == "user" and m.get("content", "").strip():
+                    # Bỏ qua câu hiện tại nếu trùng
+                    if m["content"].strip().lower() != q_low:
+                        last_user_q = m["content"].strip()
+                        break
+            # Ưu tiên câu đầu tiên để đảm bảo nhớ từ đầu phiên
+            first_user_q = None
+            for m in history:
+                if m.get("role") == "user" and m.get("content", "").strip():
+                    first_user_q = m["content"].strip()
+                    break
+            # Chọn thực thể tham chiếu: nếu câu hiện tại ngắn và mơ hồ, dùng câu đầu
+            referent = None
+            if any(pron in q_low for pron in [" nó", "cái đó", "cái này", "trong đó", "ở trên", "như trên"]):
+                # Nếu lịch sử có >1 câu, thử dùng câu đầu làm gốc để không quên
+                referent = first_user_q or last_user_q
+            else:
+                referent = last_user_q or first_user_q
+            if referent:
+                # Làm giàu câu hỏi bằng cách bổ sung thực thể
+                # Ví dụ: "nó là gì?" -> "Quy chế đào tạo là gì?"
+                # Nếu câu gốc chứa "nó", thay thế
+                heuristic = question
+                for pron in ["nó", "cái đó", "cái này", "trong đó", "ở trên"]:
+                    if pron in q_low:
+                        # Thay thế đơn giản: thêm referent vào
+                        # Nếu câu chỉ là "nó là gì?" thì trả về referent dạng câu hỏi
+                        if len(question.strip().split()) <= 4:
+                            # Câu ngắn mơ hồ -> trả về dạng "Về [referent], " + question
+                            # Hoặc thay "nó" bằng referent rút gọn
+                            short_ref = referent[:80].rstrip("?.")
+                            heuristic = question.lower().replace(pron, short_ref).strip()
+                            # Viết hoa lại
+                            if heuristic:
+                                heuristic = heuristic[0].upper() + heuristic[1:]
+                        else:
+                            heuristic = heuristic.replace("nó", referent[:60]).replace("Nó", referent[:60])
+                        break
+                # Nếu heuristic khác gốc và dài hơn thì dùng
+                if heuristic.strip().lower() != q_low and len(heuristic) > len(question):
+                    return heuristic
+                # Nếu không thay được pronoun, nối thêm ngữ cảnh đầu phiên
+                if len(question.split()) <= 6 and first_user_q:
+                    return f"{question} (liên quan đến: {first_user_q[:80]})"
+        except Exception:
+            pass
         return question
 
 
@@ -353,6 +409,35 @@ def strip_style_instruction(question: str) -> str:
 # ── Xã giao mở rộng ──
 _SOCIAL_PROFESSIONAL_HINTS = ["quy chế", "quy định", "quyết định", "thông báo", "tài liệu", "học viện", "kỹ thuật mật mã", "đào tạo", "khảo thí", "học bổng", "tốt nghiệp", "tín chỉ"]
 
+def is_history_recall_question(question: str) -> bool:
+    """Phát hiện câu hỏi yêu cầu nhớ lại lịch sử hội thoại (câu đầu tiên, vừa hỏi gì...).
+    Những câu này cần ưu tiên lịch sử thay vì ngữ cảnh retrieve."""
+    if not question or not question.strip():
+        return False
+    q_low = question.strip().lower()
+    recall_keywords = [
+        "vừa hỏi", "vua hoi",
+        "câu đầu", "cau dau",
+        "câu thứ nhất", "cau thu nhat",
+        "câu trước", "cau truoc",
+        "hỏi gì trước", "hoi gi truoc",
+        "nhớ lại", "nho lai",
+        "tóm tắt lại hội thoại", "tom tat lai hoi thoai",
+        "lịch sử hội thoại", "lich su hoi thoai",
+        "đã hỏi gì", "da hoi gi",
+        "câu hỏi đầu tiên",
+        "ban đầu hỏi", "ban dau hoi",
+    ]
+    for kw in recall_keywords:
+        if kw in q_low:
+            return True
+    # Mẫu "tôi đã hỏi gì" / "tôi vừa hỏi gì"
+    if ("tôi" in q_low or "toi" in q_low) and ("hỏi" in q_low or "hoi" in q_low) and ("gì" in q_low or "gi" in q_low):
+        # Nếu câu chứa đại từ hỏi về lịch sử thì coi là recall
+        if any(x in q_low for x in ["vừa", "vua", "đã", "da", "trước", "truoc", "đầu", "dau"]):
+            return True
+    return False
+
 def is_social_question(question: str, history: list[dict] | None = None) -> bool:
     """Nhận diện câu xã giao đời thường để đi nhánh không cần nguồn.
     Chỉ cung cấp ngoài lề khi có nguồn chính xác hoặc kiến thức huấn luyện -> nhánh xã giao cho phép dùng kiến thức chung."""
@@ -361,24 +446,29 @@ def is_social_question(question: str, history: list[dict] | None = None) -> bool
     if not question or not question.strip():
         return False
     q_low = question.strip().lower()
+    # Nếu là câu recall lịch sử thì không coi là xã giao (cần trả lời từ lịch sử)
+    if is_history_recall_question(question):
+        return False
     # Nếu chứa từ chuyên môn rõ ràng thì ưu tiên chuyên môn, không coi là xã giao
     for hint in _SOCIAL_PROFESSIONAL_HINTS:
         if hint in q_low:
             return False
-    # Kiểm tra allowlist
+    # Nếu câu cần viết lại do chứa đại từ mơ hồ + có lịch sử => likely là follow-up RAG, không phải xã giao
+    # Kiểm tra đại từ tham chiếu
+    if history and _needs_rewrite(question, history):
+        # chứa "nó", "cái đó", "trong đó" v.v. và lịch sử tồn tại => không phải xã giao
+        return False
+    # Kiểm tra allowlist -> chắc chắn là xã giao
     for kw in SOCIAL_ALLOWLIST:
         if kw.lower() in q_low:
             return True
-    # Các câu rất ngắn, không có từ chuyên môn, thường là chào hỏi
+    # Các câu rất ngắn: chỉ coi là xã giao nếu khớp mẫu chào hỏi cụ thể, không phải bất kỳ câu ngắn nào
+    # Đã thắt chặt: yêu cầu phải chứa từ khóa xã giao, không tự động cho mọi câu ngắn
     if len(q_low.split()) <= 4 and len(q_low) < 30:
-        # loại trừ câu ngắn nhưng là câu hỏi chuyên môn dạng "là gì?"
-        # nếu đã có lịch sử chuyên môn dài thì không coi là xã giao đơn thuần
-        if history and len(history) > 4:
-            # vẫn có thể là xã giao chen giữa, cho phép
-            pass
-        # nếu câu ngắn và không có từ chuyên môn, coi là xã giao
-        if not any(h in q_low for h in _SOCIAL_PROFESSIONAL_HINTS):
-            return True
+        # Chỉ coi là xã giao nếu chứa từ chào hỏi/cảm ơn/tạm biệt trong allowlist hoặc là câu chào ngắn
+        # Đã kiểm tra allowlist ở trên, nếu không khớp thì không phải xã giao
+        # Loại bỏ logic broad "mọi câu ngắn đều là xã giao" gây nhầm với "nó là gì?" hoặc "đồ súc vật"
+        return False
     return False
 
 def generate_social(question: str, history: list[dict] | None = None, summary: str | None = None, style: str | None = None) -> str:

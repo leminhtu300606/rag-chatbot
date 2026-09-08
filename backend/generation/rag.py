@@ -16,7 +16,7 @@ from backend.config import (
     CONVERSATION_MAX_HISTORY_CHARS,
     DEFAULT_STYLE,
 )
-from backend.generation.generator import generate, generate_with_history, generate_social, is_social_question, rewrite_query, summarize_history, detect_style_change, strip_style_instruction
+from backend.generation.generator import generate, generate_with_history, generate_social, is_social_question, is_history_recall_question, rewrite_query, summarize_history, detect_style_change, strip_style_instruction
 from backend.indexing.retriever import retrieve
 
 from backend.generation.reranker import DEFAULT_RERANK_TOP_K, rerank
@@ -62,6 +62,7 @@ def _prepare_history(
     summary = None
     if len(cleaned) > threshold_msgs:
         # Nhớ từ đầu phiên: tóm tắt toàn bộ phần cũ từ đầu đến trước cửa sổ gần nhất
+        # Chỉ tóm tắt khi vượt ngưỡng, trước đó giữ nguyên toàn bộ để không mất câu đầu
         old_part = cleaned[:-window_size] if len(cleaned) > window_size else cleaned[: len(cleaned) // 2]
         if old_part:
             try:
@@ -69,8 +70,8 @@ def _prepare_history(
             except Exception:
                 summary = None
         cleaned = cleaned[-window_size:]
-    elif len(cleaned) > window_size:
-        cleaned = cleaned[-window_size:]
+    # Nếu chưa vượt ngưỡng thì giữ nguyên toàn bộ (không cắt ở window) để không mất câu đầu tiên
+    # Chỉ cắt khi đã tóm tắt phía trên
 
     return (cleaned if cleaned else None), summary
 
@@ -173,6 +174,34 @@ def answer_with_history(
 
     # Chuẩn bị cửa sổ lịch sử và tóm tắt (nhớ từ đầu phiên) - luôn cần dù là xã giao
     history_window, summary = _prepare_history(history)
+
+    # Nhánh recall lịch sử: câu hỏi về hội thoại trước (câu đầu tiên, vừa hỏi gì...) -> trả lời trực tiếp từ lịch sử, không cần retrieve
+    if is_history_recall_question(effective_question):
+        # Dùng generate_with_history với context rỗng để ưu tiên lịch sử
+        # Thêm chỉ dẫn rõ ràng để LLM trả lời từ lịch sử
+        recall_question = effective_question + " (Hãy trả lời dựa trên lịch sử hội thoại đã cung cấp, liệt kê chính xác các câu hỏi trước, đặc biệt là câu đầu tiên.)"
+        text = generate_with_history([], recall_question, history_window, summary, style=effective_style)
+        # Fallback nếu LLM không trả lời hoặc nói không đủ nguồn
+        if not text or "không đủ nguồn" in text.lower():
+            # Tạo câu trả lời fallback từ lịch sử thực tế
+            if history_window:
+                user_qs = [m["content"] for m in history_window if m.get("role") == "user"]
+                if user_qs:
+                    listing = "\n".join([f"{i+1}. {q}" for i, q in enumerate(user_qs)])
+                    text = f"Các câu hỏi bạn đã hỏi trong phiên này:\n{listing}\n\nCâu đầu tiên là: \"{user_qs[0]}\""
+                else:
+                    text = "Lịch sử hội thoại hiện tại trống, chưa có câu hỏi nào trước đó."
+            else:
+                text = "Chưa có lịch sử hội thoại để nhớ lại."
+        return {
+            "answer": text,
+            "sources": [],
+            "context": [],
+            "standalone_question": effective_question,
+            "summary": summary,
+            "history_used": history_window,
+            "style": effective_style,
+        }
 
     # Nhánh xã giao mở rộng: nếu câu là xã giao đời thường thì không cần nguồn, trả lời tự nhiên
     # Chỉ cung cấp ngoài lề khi có nguồn chính xác hoặc kiến thức huấn luyện -> cho phép dùng generate_social

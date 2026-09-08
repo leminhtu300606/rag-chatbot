@@ -385,11 +385,11 @@ async def chat(req: ChatRequest):
         raise HTTPException(status_code=400, detail=f"Category khong hop le. Chon trong: {cfg.CATEGORY_ORDER}")
 
     # Kiem tra co data truoc khi goi LLM (tranh goi Ollama khi chua co data)
-    # Nhưng với câu xã giao thì không cần data, cho phép trả lời ngay bằng giọng đời thường
+    # Nhưng với câu xã giao hoặc recall lịch sử thì không cần data, cho phép trả lời ngay
     is_social_early = False
     try:
-        from backend.generation.generator import is_social_question
-        is_social_early = is_social_question(req.question, None)
+        from backend.generation.generator import is_social_question, is_history_recall_question
+        is_social_early = is_social_question(req.question, None) or is_history_recall_question(req.question)
     except Exception:
         pass
     if not is_social_early:

@@ -50,9 +50,17 @@ function isSocialFrontend(q){
   const low = q.toLowerCase();
   const prof = ["quy chế","quy định","quyết định","thông báo","tài liệu","học viện","kỹ thuật mật mã","đào tạo","khảo thí","học bổng","tín chỉ"];
   for(const h of prof) if(low.includes(h)) return false;
+  // Nếu chứa đại từ tham chiếu như "nó", "cái đó" -> không phải xã giao, cần nhớ ngữ cảnh
+  const pronouns = [" nó ", " nó?", " nó.", "cái đó", "cái này", "trong đó", "ở trên", "như trên", "của nó", "về nó"];
+  for(const p of pronouns) if(low.includes(p)) return false;
+  if(low.includes(" nó") || low.split(/\s+/).includes("nó")) return false;
+  // Câu recall lịch sử cũng không phải xã giao
+  const recall = ["vừa hỏi", "câu đầu", "cau dau", "vua hoi", "đã hỏi", "da hoi", "nhớ lại", "nho lai", "tóm tắt", "lich su"];
+  for(const kw of recall) if(low.includes(kw)) return false;
   const socialKeywords = ["xin chào","chào bạn","chào","hello","hi","hey","khỏe không","khoe khong","khỏe","khoe","cảm ơn","cam on","tạm biệt","bye","bạn là ai","ban la ai","kể chuyện","hôm nay","thời tiết","bạn khỏe không"];
   for(const kw of socialKeywords) if(low.includes(kw)) return true;
-  if(low.split(/\s+/).length <=4 && low.length < 30) return true;
+  // Thắt chặt: không coi mọi câu ngắn là xã giao (tránh nhầm "nó là gì?" hoặc "đồ súc vật")
+  // Chỉ xã giao nếu khớp allowlist ở trên, không tự động true cho câu ngắn
   return false;
 }
 
