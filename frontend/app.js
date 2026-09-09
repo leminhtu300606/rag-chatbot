@@ -18,8 +18,9 @@ const summaryInfo = $("#summary-info");
 
 let isLoading = false;
 
-const TYPEWRITER_SPEED = 18;
+const TYPEWRITER_SPEED = 12; // giảm từ 18 để hiện nhanh hơn
 let _typingAbort = null;
+const ENABLE_STREAM = true; // bật streaming nếu backend hỗ trợ
 
 // ── Multi-session storage (persistent + keep old sessions) ──
 const LS_SESSIONS = "rag_sessions_v2";
@@ -637,16 +638,24 @@ function addMsgSimple(role, text, meta=""){
 
 async function loadHealth(){
   try{
-    const r=await fetch("/api/health"); const j=await r.json();
-    if(j.status==="ready") setHealth("ok", `${j.chroma_count} vectors • ${j.processed_files} files`);
-    else if(j.status==="not_ready") setHealth("warn", `not ready • ${j.chroma_count||0}`);
-    else setHealth("err", j.error||"error");
-    const s=await fetch("/api/stats").then(r=>r.json());
-    if(s.llm_backend){ if(llmInfo) llmInfo.textContent=`${s.llm_model} • ${s.llm_backend}`; if(modelFoot) modelFoot.textContent=`${s.chroma_count} chunks • ${s.embed_model} • ${s.llm_model} • ${conversation.length/2|0} turns`; }
+    // Gọi song song để nhanh hơn thay vì đợi từng cái
+    const [hRes, sRes] = await Promise.allSettled([fetch("/api/health"), fetch("/api/stats")]);
+    if(hRes.status==="fulfilled" && hRes.value.ok){
+      const j=await hRes.value.json();
+      if(j.status==="ready") setHealth("ok", `${j.chroma_count} vectors • ${j.processed_files} files`);
+      else if(j.status==="not_ready") setHealth("warn", `not ready • ${j.chroma_count||0}`);
+      else setHealth("err", j.error||"error");
+    }
+    if(sRes.status==="fulfilled" && sRes.value.ok){
+      const s=await sRes.value.json();
+      if(s.llm_backend){ if(llmInfo) llmInfo.textContent=`${s.llm_model} • ${s.llm_backend} (${s.device||s.embed_model})`; if(modelFoot) modelFoot.textContent=`${s.chroma_count} chunks • ${s.embed_model} • ${s.llm_model} • ${conversation.length/2|0} turns`; }
+    }
   }catch(e){ setHealth("err","offline"); }
 }
-loadHealth(); setInterval(loadHealth,15000);
-setInterval(fetchAndMergeServerSessions, 10000);
+loadHealth();
+// Giảm tần suất polling để nhẹ máy hơn: health 30s, sessions 30s và chỉ khi tab đang mở
+setInterval(()=>{ if(document.visibilityState==="visible") loadHealth(); },30000);
+setInterval(()=>{ if(document.visibilityState==="visible") fetchAndMergeServerSessions(); },30000);
 
 $("#stats-btn")?.addEventListener("click", async()=>{
   const dlg=$("#stats-modal"); const pre=$("#stats-pre");
@@ -685,14 +694,86 @@ async function send(){
   isLoading=true; if(sendBtn) sendBtn.disabled=true; setStatus(use_history && historyToSend ? "Đang rewrite & truy xuất..." : "Đang truy xuất...");
   const placeholder=addMsg("assistant", "⏳ Đang suy nghĩ...");
 
+  // Helper streaming parser
+  async function fetchStream(body, onToken){
+    const r = await fetch("/api/chat/stream",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!r.ok || !r.body){
+      const j = await r.json().catch(()=>({detail:r.statusText}));
+      throw new Error(j.detail||JSON.stringify(j));
+    }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let full = "";
+    let meta = null;
+    while(true){
+      const {done, value} = await reader.read();
+      if(done) break;
+      buf += decoder.decode(value, {stream:true});
+      const lines = buf.split("\n\n");
+      buf = lines.pop();
+      for(const line of lines){
+        if(!line.startsWith("data: ")) continue;
+        try{
+          const data = JSON.parse(line.slice(6));
+          if(data.token){
+            full += data.token;
+            if(onToken) onToken(data.token, full);
+          }
+          if(data.done) meta = data;
+          if(data.error) throw new Error(data.error);
+        }catch(e){ if(e.message && e.message.includes("error")) throw e; }
+      }
+    }
+    return {answer: full, meta};
+  }
+
   try{
     const body = {question:q, category, top_k, use_rerank, show_context, use_history, style: getActiveStyle()};
     if (historyToSend) body.history = historyToSend.map(m=>({role:m.role, content:m.content}));
     if (activeSessionId) body.session_id = activeSessionId;
 
-    const r=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-    const j=await r.json();
-    if(!r.ok) throw new Error(j.detail||JSON.stringify(j));
+    let j = null;
+    let streamed = false;
+    // Thử streaming cho câu RAG thông thường (không phải toán/xã giao) để thấy chữ hiện dần
+    const canStream = ENABLE_STREAM && !isMathFrontend(q) && !isSocialFrontend(q) && typeof ReadableStream !== "undefined";
+    if(canStream){
+      try{
+        const bubbleTmp = placeholder.querySelector(".bubble");
+        bubbleTmp.innerHTML=`<span class="answer-text"></span><div class="meta"><span class="tool">🔄 đang tạo...</span></div>`;
+        const answerElTmp = bubbleTmp.querySelector(".answer-text");
+        let streamingText = "";
+        setStatus("Đang tạo trả lời...");
+        const streamRes = await fetchStream(body, (tok, full)=>{
+          streamingText = full;
+          answerElTmp.textContent = full;
+          if(messages) messages.scrollTop = messages.scrollHeight;
+        });
+        // Sau stream xong, lấy thêm thông tin từ /api/chat để có sources/rewrite (không gọi LLM lại)
+        // Dùng kết quả stream làm answer, bổ sung meta từ stream
+        j = {
+          answer: streamRes.answer,
+          sources: [],
+          context: [],
+          session_id: streamRes.meta?.session_id || activeSessionId,
+          standalone_question: q,
+          history_used: historyToSend,
+          style: getActiveStyle(),
+        };
+        // Nếu backend stream đã lưu session thì đồng bộ
+        streamed = true;
+        // Để lấy sources chính xác, gọi nhanh /api/chat với cùng body nhưng backend sẽ trả cache nếu có? Tạm bỏ qua sources cho stream
+        // Nếu cần sources, có thể fetch song song nhưng giữ đơn giản
+      }catch(e){
+        console.warn("[stream] fallback to normal", e);
+        streamed = false;
+      }
+    }
+    if(!streamed){
+      const r=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+      j=await r.json();
+      if(!r.ok) throw new Error(j.detail||JSON.stringify(j));
+    }
 
     // Đồng bộ style nếu server phát hiện đổi phong cách qua câu tự nhiên
     if(j.style && j.style !== getActiveStyle()){

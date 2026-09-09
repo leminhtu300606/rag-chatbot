@@ -122,7 +122,12 @@ def build(rebuild: bool = False) -> None:
         print(f"  Mẫu metadata[0]: id={sample.get('id')} | file={sample.get('filename')} | cat={sample.get('category')} | page={sample.get('page')} | idx={sample.get('chunk_index')} | mode={sample.get('chunk_mode')}")
 
     texts = [c["text"] for c in to_embed]
-    embeddings = embed(texts)
+    # Dùng batch size tối ưu theo phần cứng, tự chia nhỏ để tránh OOM
+    try:
+        batch = int(getattr(cfg, "EMBED_BATCH_SIZE", 32))
+    except Exception:
+        batch = 32
+    embeddings = embed(texts, batch_size=batch)
 
     emb_dim = len(embeddings[0]) if len(embeddings) > 0 else 0
     print(f"  Embedding model: {cfg.EMBED_MODEL} | dim={emb_dim} | total={len(embeddings)}")

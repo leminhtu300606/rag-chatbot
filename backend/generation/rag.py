@@ -18,6 +18,13 @@ from backend.config import (
 )
 from backend.generation.generator import generate, generate_with_history, generate_social, is_social_question, is_history_recall_question, rewrite_query, summarize_history, detect_style_change, strip_style_instruction
 from backend.indexing.retriever import retrieve
+# Security: output validation defense in depth
+try:
+    from backend.security import validate_output, validate_sources, validate_tool_call
+except Exception:
+    def validate_output(x, max_len=4000): return x[:max_len] if x else x
+    def validate_sources(x): return x
+    def validate_tool_call(n,p): return p
 
 from backend.generation.reranker import DEFAULT_RERANK_TOP_K, rerank
 
@@ -251,7 +258,7 @@ def answer(
             social_style = "casual"
         else:
             social_style = effective_style
-        text = generate_social(effective_question, history=None, summary=None, style=social_style)
+        text = validate_output(generate_social(effective_question, history=None, summary=None, style=social_style))
         return {
             "answer": text,
             "sources": [],
@@ -264,12 +271,17 @@ def answer(
     fetch_k = top_k * 3 if use_rerank and rerank else top_k
 
     query_for_retrieval = effective_question
+    # Validate tool call: AI chỉ đề xuất, backend kiểm tra
+    validate_tool_call("retrieve", {"category": category, "top_k": fetch_k})
     context = retrieve(query_for_retrieval, category=category, top_k=fetch_k)
 
     if use_rerank and rerank and context:
+        validate_tool_call("rerank", {"top_k": top_k})
         context = rerank(query_for_retrieval, context, top_k=rerank_k if rerank_k is not None else top_k)
+        # Validate sources sau rerank
+        context = [{"text": c["text"], "metadata": c["metadata"], "score": c["score"]} for c in context[:10]]
 
-    text = generate(context, query_for_retrieval, style=effective_style)
+    text = validate_output(generate(context, query_for_retrieval, style=effective_style))
     return {
         "answer": text,
         "sources": [c["metadata"] for c in context],
@@ -300,10 +312,12 @@ def answer_with_history(
         # Tạo câu trả lời xác nhận theo phong cách mới (không cần nguồn)
         confirm_context = []
         # Dùng generate_with_history với context rỗng để LLM nói theo style mới
-        text = generate_with_history(confirm_context, f"Xác nhận đã đổi sang phong cách {effective_style}", history_window, summary, style=effective_style)
+        text = validate_output(generate_with_history(confirm_context, f"Xác nhận đã đổi sang phong cách {effective_style}", history_window, summary, style=effective_style))
         # Nếu LLM không trả lời đúng, fallback
         if not text or "phong cách" not in text.lower():
             text = f"Đã đổi sang phong cách {effective_style}. Từ giờ mình sẽ trả lời theo phong cách này nhé. Bạn cần hỏi gì tiếp?"
+        else:
+            text = validate_output(text)
         return {
             "answer": text,
             "sources": [],
@@ -325,7 +339,7 @@ def answer_with_history(
         # Dùng generate_with_history với context rỗng để ưu tiên lịch sử
         # Thêm chỉ dẫn rõ ràng để LLM trả lời từ lịch sử
         recall_question = effective_question + " (Hãy trả lời dựa trên lịch sử hội thoại đã cung cấp, liệt kê chính xác các câu hỏi trước, đặc biệt là câu đầu tiên.)"
-        text = generate_with_history([], recall_question, history_window, summary, style=effective_style)
+        text = validate_output(generate_with_history([], recall_question, history_window, summary, style=effective_style))
         # Fallback nếu LLM không trả lời hoặc nói không đủ nguồn
         if not text or "không đủ nguồn" in text.lower():
             # Tạo câu trả lời fallback từ lịch sử thực tế
@@ -333,7 +347,7 @@ def answer_with_history(
                 user_qs = [m["content"] for m in history_window if m.get("role") == "user"]
                 if user_qs:
                     listing = "\n".join([f"{i+1}. {q}" for i, q in enumerate(user_qs)])
-                    text = f"Các câu hỏi bạn đã hỏi trong phiên này:\n{listing}\n\nCâu đầu tiên là: \"{user_qs[0]}\""
+                    text = validate_output(f"Các câu hỏi bạn đã hỏi trong phiên này:\n{listing}\n\nCâu đầu tiên là: \"{user_qs[0]}\"")
                 else:
                     text = "Lịch sử hội thoại hiện tại trống, chưa có câu hỏi nào trước đó."
             else:
@@ -479,7 +493,7 @@ def answer_with_history(
         if effective_style not in ["casual", "friendly", "humorous", "empathetic", "plain", "simple"]:
             # nếu đang là formal mà câu xã giao thì dùng casual cho tự nhiên
             social_style = "casual"
-        text = generate_social(effective_question, history_window, summary, style=social_style)
+        text = validate_output(generate_social(effective_question, history_window, summary, style=social_style))
         return {
             "answer": text,
             "sources": [],
@@ -494,6 +508,7 @@ def answer_with_history(
     standalone_q = effective_question
     if history_window:
         try:
+            # rewrite_query là untrusted nhưng đã được bọc trong security, vẫn validate
             standalone_q = rewrite_query(effective_question, history_window)
         except Exception:
             standalone_q = effective_question
@@ -501,14 +516,18 @@ def answer_with_history(
     if top_k is None:
         top_k = DEFAULT_RERANK_TOP_K if (use_rerank and rerank) else RETRIEVE_TOP_K
     fetch_k = top_k * 3 if use_rerank and rerank else top_k
+    # Validate tool call trước khi retrieve
+    validate_tool_call("retrieve", {"category": category, "top_k": fetch_k})
 
     query_for_retrieval = standalone_q if standalone_q and standalone_q.strip() else effective_question
     context = retrieve(query_for_retrieval, category=category, top_k=fetch_k)
 
     if use_rerank and rerank and context:
+        validate_tool_call("rerank", {"top_k": top_k})
         context = rerank(query_for_retrieval, context, top_k=rerank_k if rerank_k is not None else top_k)
+        context = [{"text": c["text"], "metadata": c["metadata"], "score": c["score"]} for c in context[:10]]
 
-    text = generate_with_history(context, effective_question, history_window, summary, style=effective_style)
+    text = validate_output(generate_with_history(context, effective_question, history_window, summary, style=effective_style))
 
     return {
         "answer": text,

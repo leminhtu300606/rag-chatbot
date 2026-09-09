@@ -25,17 +25,53 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(_ROOT))
 
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 import time
 import uuid
 import threading
 import json
+import re
 
 import backend.config as cfg
+# Security
+try:
+    from backend.security import (
+        validate_question, validate_category, validate_top_k, validate_session_id,
+        validate_tool_call, validate_output, validate_sources,
+        sanitize_input, detect_injection
+    )
+except Exception:
+    # Fallback nếu chưa có security.py
+    def validate_question(x): return x.strip()[:2000]
+    def validate_category(x): return x
+    def validate_top_k(x): return x
+    def validate_session_id(x): return x
+    def validate_tool_call(n,p): return p
+    def validate_output(x, max_len=4000): return x[:max_len]
+    def validate_sources(x): return x
+    def sanitize_input(x, max_len=2000): return x[:max_len]
+    def detect_injection(x): return False
+
+# Rate limiting đơn giản: 30 requests / phút / IP
+_rate_limit: Dict[str, List[float]] = {}
+_rate_lock = threading.Lock()
+RATE_LIMIT_MAX = 30
+RATE_LIMIT_WINDOW = 60
+
+def _check_rate_limit(ip: str):
+    now = time.time()
+    with _rate_lock:
+        lst = _rate_limit.get(ip, [])
+        # giữ lại trong window
+        lst = [t for t in lst if now - t < RATE_LIMIT_WINDOW]
+        if len(lst) >= RATE_LIMIT_MAX:
+            raise HTTPException(status_code=429, detail="Quá nhiều yêu cầu, vui lòng thử lại sau 1 phút")
+        lst.append(now)
+        _rate_limit[ip] = lst
 
 def _print_banner(host: str = "0.0.0.0", port: int = 8000):
     """In link chay ra console cho de thay."""
@@ -63,6 +99,9 @@ def _print_banner(host: str = "0.0.0.0", port: int = 8000):
 
 
 from contextlib import asynccontextmanager
+import asyncio
+from starlette.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -71,6 +110,22 @@ async def lifespan(app: FastAPI):
         _print_banner(host="0.0.0.0", port=8000)
     except Exception:
         pass
+    # Warmup model nhẹ để request đầu không chậm
+    try:
+        print(f"[warmup] DEVICE={cfg.DEVICE} USE_GPU={getattr(cfg,'USE_GPU',False)} EMBED_BATCH={getattr(cfg,'EMBED_BATCH_SIZE',32)}")
+        # Chạy warmup trong threadpool để không chặn startup
+        def _warm():
+            try:
+                from backend.indexing.embedder import warmup as em_warm
+                from backend.generation.reranker import warmup as rr_warm
+                em_warm()
+                rr_warm()
+                print("[warmup] embed + reranker ready")
+            except Exception as e:
+                print(f"[warmup] skip: {e}")
+        await run_in_threadpool(_warm)
+    except Exception as e:
+        print(f"[warmup] failed: {e}")
     yield
 
 app = FastAPI(
@@ -219,6 +274,25 @@ class ChatMessage(BaseModel):
     role: str = Field(..., description="user | assistant | system")
     content: str
 
+    @field_validator('content')
+    @classmethod
+    def check_content_len(cls, v):
+        if len(v) > 2000:
+            raise ValueError('content quá dài (max 2000)')
+        # Loại bỏ ký tự điều khiển
+        v = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", v)
+        return v[:2000]
+
+    @field_validator('role')
+    @classmethod
+    def check_role(cls, v):
+        if v not in ("user", "assistant", "system"):
+            return "user"
+        # System trong history chỉ được backend tạo, không cho client gửi tuỳ ý
+        if v == "system":
+            raise ValueError('role system không được phép từ client')
+        return v
+
 class ChatRequest(BaseModel):
     question: str
     category: Optional[str] = None
@@ -230,6 +304,53 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     use_history: bool = True  # cho phép tắt lịch sử để hỏi đơn lượt
     style: Optional[str] = None  # phong cách do frontend gửi hoặc để trống sẽ tự phát hiện qua câu tự nhiên
+
+    @field_validator('question')
+    @classmethod
+    def check_question(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Câu hỏi rỗng')
+        if len(v) > 2000:
+            raise ValueError('Câu hỏi quá dài (max 2000)')
+        return v[:2000]
+
+    @field_validator('top_k')
+    @classmethod
+    def check_top_k(cls, v):
+        if v is None:
+            return v
+        if not (1 <= int(v) <= 10):
+            raise ValueError('top_k phải từ 1 đến 10')
+        return int(v)
+
+    @field_validator('category')
+    @classmethod
+    def check_category(cls, v):
+        if v is None:
+            return v
+        if v not in cfg.CATEGORY_ORDER:
+            raise ValueError(f'Category không hợp lệ')
+        return v
+
+    @field_validator('style')
+    @classmethod
+    def check_style(cls, v):
+        if v is None:
+            return v
+        if v not in cfg.AVAILABLE_STYLES:
+            raise ValueError('style không hợp lệ')
+        return v
+
+    @field_validator('session_id')
+    @classmethod
+    def check_session(cls, v):
+        if v is None:
+            return v
+        if len(v) > 128:
+            raise ValueError('session_id quá dài')
+        if not re.match(r"^[a-zA-Z0-9\-_]+$", v):
+            raise ValueError('session_id không hợp lệ')
+        return v
 
 class ChatResponse(BaseModel):
     answer: str
@@ -256,6 +377,10 @@ def _get_stats():
             "chroma_count": vec_count(),
             "chroma_stats": vec_stats(),
             "embed_model": cfg.EMBED_MODEL,
+            "device": getattr(cfg, "DEVICE", "cpu"),
+            "use_gpu": getattr(cfg, "USE_GPU", False),
+            "embed_batch": getattr(cfg, "EMBED_BATCH_SIZE", 32),
+            "rerank_batch": getattr(cfg, "RERANK_BATCH_SIZE", 16),
             "llm_backend": cfg.LLM_BACKEND,
             "llm_model": cfg.LLM_MODEL,
             "rerank_model": "cross-encoder/ms-marco-MiniLM-L-6-v2",
@@ -386,13 +511,38 @@ async def update_session(session_id: str, req: UpdateSessionRequest):
     return {"session_id": session_id, "title": req.title.strip()[:50]}
 
 @app.post("/api/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, request: Request):
+    # Rate limiting
+    try:
+        ip = request.client.host if request.client else "unknown"
+        _check_rate_limit(ip)
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    # Backend validation: AI chỉ đề xuất, backend kiểm tra lại (Least Privilege)
+    try:
+        req.question = validate_question(req.question)
+        if req.category:
+            req.category = validate_category(req.category)
+        if req.top_k is not None:
+            req.top_k = validate_top_k(req.top_k)
+        if req.session_id:
+            req.session_id = validate_session_id(req.session_id)
+        # Validate tool call: AI chỉ được phép retrieve với category/top_k đã kiểm duyệt
+        validate_tool_call("retrieve", {"category": req.category, "top_k": req.top_k})
+        # Giới hạn history client gửi: tối đa 20 items, mỗi item 2000 chars đã được validator ở trên
+        if req.history and len(req.history) > 20:
+            raise HTTPException(status_code=400, detail="history quá dài (max 20)")
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Validation error: {e}")
+
     if not req.question or not req.question.strip():
         raise HTTPException(status_code=400, detail="Cau hoi rong")
-
-    # Validate category
-    if req.category and req.category not in cfg.CATEGORY_ORDER:
-        raise HTTPException(status_code=400, detail=f"Category khong hop le. Chon trong: {cfg.CATEGORY_ORDER}")
 
     # Kiem tra co data truoc khi goi LLM (tranh goi Ollama khi chua co data)
     # Nhưng với câu xã giao, recall lịch sử, toán học hoặc so sánh thì không cần data, cho phép trả lời ngay
@@ -411,7 +561,9 @@ async def chat(req: ChatRequest):
         try:
             from backend.indexing.vectorstore import count as vec_count
             from backend.preprocessing.storage import get_processed_files
-            if vec_count() == 0 or len(get_processed_files()) == 0:
+            c = await run_in_threadpool(vec_count)
+            files = await run_in_threadpool(get_processed_files)
+            if c == 0 or len(files) == 0:
                 sid = _get_or_create_session(req.session_id) if req.session_id or req.history else None
                 return ChatResponse(
                     answer="Chua co du lieu de tra loi. Vui long chay: python -m backend.clean && python -m backend.index --rebuild, sau do thu lai.",
@@ -530,18 +682,30 @@ async def chat(req: ChatRequest):
             with _sessions_lock:
                 last_math_result = _sessions.get(session_id, {}).get("last_math_result")
 
-        # Goi RAG tuong ung (truyền phong cách)
+        # Goi RAG tuong ung (truyền phong cách) - chạy trong threadpool để không chặn event loop
         if effective_history:
             from backend.generation.rag import answer_with_history
-            res = answer_with_history(
-                question=req.question,
-                history=effective_history,
-                category=req.category,
-                top_k=req.top_k,
-                use_rerank=req.use_rerank,
-                style=effective_style,
-                last_math_result=last_math_result,
+            res = await run_in_threadpool(
+                lambda: answer_with_history(
+                    question=req.question,
+                    history=effective_history,
+                    category=req.category,
+                    top_k=req.top_k,
+                    use_rerank=req.use_rerank,
+                    style=effective_style,
+                    last_math_result=last_math_result,
+                )
             )
+            # Output validation: kiểm tra kết quả AI trước khi đưa vào hệ thống
+            try:
+                res["answer"] = validate_output(res.get("answer", ""))
+                if "sources" in res:
+                    res["sources"] = validate_sources(res.get("sources", []))
+                if "context" in res and res["context"]:
+                    # Giới hạn context trả về
+                    res["context"] = res["context"][: res.get("top_k", 3) if isinstance(res.get("top_k"), int) else 10]
+            except Exception:
+                pass
             # Cập nhật style từ kết quả nếu có (phát hiện đổi phong cách)
             final_style = res.get("style", effective_style)
             # Xử lý so sánh trước toán học: giữ last_math_result cũ (không ghi đè bằng biểu thức so sánh)
@@ -631,14 +795,23 @@ async def chat(req: ChatRequest):
             # Chế độ đơn lượt (không dùng lịch sử) - vẫn hỗ trợ toán học với last_math_result
             from backend.generation.rag import answer
             # last_math_result đã lấy ở trên, dùng lại
-            res = answer(
-                question=req.question,
-                category=req.category,
-                top_k=req.top_k,
-                use_rerank=req.use_rerank,
-                style=effective_style,
-                last_math_result=last_math_result if 'last_math_result' in locals() else None,
+            res = await run_in_threadpool(
+                lambda: answer(
+                    question=req.question,
+                    category=req.category,
+                    top_k=req.top_k,
+                    use_rerank=req.use_rerank,
+                    style=effective_style,
+                    last_math_result=last_math_result if 'last_math_result' in locals() else None,
+                )
             )
+            # Output validation cho nhánh đơn lượt
+            try:
+                res["answer"] = validate_output(res.get("answer", ""))
+                if "sources" in res:
+                    res["sources"] = validate_sources(res.get("sources", []))
+            except Exception:
+                pass
             final_style = res.get("style", effective_style)
             # So sánh đơn lượt: không ghi đè last_math_result bằng biểu thức so sánh
             if "comparison_answer" in res:
@@ -750,6 +923,124 @@ async def chat(req: ChatRequest):
                 status_code=503,
                 detail="Khong ket noi duoc Ollama (http://localhost:11434) hoac model loi. Kiem tra: ollama serve & ollama list & ollama pull. Chi tiet: " + str(e),
             )
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/chat/stream")
+async def chat_stream(req: ChatRequest, request: Request):
+    """Streaming chat - trả chữ dần dần để người dùng thấy phản hồi nhanh hơn."""
+    # Rate limit
+    try:
+        ip = request.client.host if request.client else "unknown"
+        _check_rate_limit(ip)
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    # Validate như /api/chat
+    try:
+        req.question = validate_question(req.question)
+        if req.category:
+            req.category = validate_category(req.category)
+        if req.top_k is not None:
+            req.top_k = validate_top_k(req.top_k)
+        if req.session_id:
+            req.session_id = validate_session_id(req.session_id)
+        validate_tool_call("retrieve", {"category": req.category, "top_k": req.top_k})
+        if req.history and len(req.history) > 20:
+            raise HTTPException(status_code=400, detail="history quá dài")
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    if not req.question or not req.question.strip():
+        raise HTTPException(status_code=400, detail="Cau hoi rong")
+    # Tận dụng logic chat thường nhưng stream phần generate
+    # Với câu toán/xã giao thì trả ngay không cần stream
+    try:
+        from backend.generation.generator import is_social_question, is_history_recall_question
+        from backend.generation.calculator import is_math_question, is_comparison_question, is_multi_math_question
+        # Kiểm tra nhanh có cần RAG không
+        is_simple = False
+        try:
+            is_simple = is_social_question(req.question, None) or is_history_recall_question(req.question) or is_math_question(req.question, None, None) or is_comparison_question(req.question, None, None)
+        except Exception:
+            pass
+        if is_simple:
+            # Dùng luôn endpoint thường
+            res = await chat(req)
+            async def _simple_gen():
+                import json as _j
+                yield f"data: {_j.dumps({'token': res.answer}, ensure_ascii=False)}\n\n"
+                yield f"data: {_j.dumps({'done': True, 'answer': res.answer, 'session_id': res.session_id}, ensure_ascii=False)}\n\n"
+            return StreamingResponse(_simple_gen(), media_type="text/event-stream")
+        # Với RAG cần stream từ Ollama
+        # Chuẩn bị history/session như chat thường (rút gọn)
+        session_id = req.session_id.strip() if req.session_id and req.session_id.strip() else None
+        if not session_id and req.history:
+            session_id = _get_or_create_session(None)
+        effective_style = req.style.strip().lower() if req.style and req.style.strip().lower() in cfg.AVAILABLE_STYLES else cfg.DEFAULT_STYLE
+        # Lấy history từ session nếu có
+        eff_hist = None
+        if session_id and session_id in _sessions:
+            with _sessions_lock:
+                eff_hist = list(_sessions[session_id]["history"])
+        elif req.history:
+            eff_hist = [{"role": m.role, "content": m.content} for m in req.history]
+
+        from backend.generation.rag import answer_with_history, answer
+        from backend.generation.generator import _call_ollama_stream
+        from backend.indexing.retriever import retrieve
+        from backend.generation.reranker import rerank
+        from backend.generation.generator import rewrite_query
+        from backend.generation.prompts import build_messages_with_history, build_messages
+        from backend.config import RETRIEVE_TOP_K
+
+        # Chuẩn bị context nhanh
+        async def _gen():
+            import json as _j
+            try:
+                # Lấy context
+                standalone_q = req.question
+                if eff_hist:
+                    try:
+                        standalone_q = await run_in_threadpool(lambda: rewrite_query(req.question, eff_hist))
+                    except Exception:
+                        pass
+                fetch_k = (req.top_k or RETRIEVE_TOP_K) * 3 if req.use_rerank else (req.top_k or RETRIEVE_TOP_K)
+                ctx = await run_in_threadpool(lambda: retrieve(standalone_q, category=req.category, top_k=fetch_k))
+                if req.use_rerank and ctx:
+                    ctx = await run_in_threadpool(lambda: rerank(standalone_q, ctx, top_k=req.top_k or RETRIEVE_TOP_K))
+                # Build messages
+                if eff_hist:
+                    from backend.generation.rag import _prepare_history as _prep
+                    hist_win, summ = await run_in_threadpool(lambda: _prep(eff_hist))
+                    messages = build_messages_with_history(ctx, req.question, hist_win, summ, style=effective_style)
+                else:
+                    messages = build_messages(ctx, req.question, style=effective_style)
+                # Stream từ Ollama - output validation từng token đã bọc, full sẽ được kiểm tra
+                full = ""
+                for token in _call_ollama_stream(messages, cfg.LLM_MODEL, cfg.GEN_MAX_TOKENS, cfg.LLM_THINK):
+                    # Loại bỏ delimiter giả mạo trong token streaming
+                    token_safe = token.replace("<<<UNTRUSTED_DATA>>>", "").replace("<<<END_UNTRUSTED_DATA>>>", "")
+                    full += token_safe
+                    yield f"data: {_j.dumps({'token': token_safe}, ensure_ascii=False)}\n\n"
+                # Output validation cho toàn bộ trước khi lưu
+                try:
+                    full = validate_output(full)
+                except Exception:
+                    pass
+                # Lưu session sau khi xong (đã validated)
+                if session_id:
+                    try:
+                        _append_to_session(session_id, sanitize_input(req.question, max_len=2000), full, style=effective_style)
+                    except Exception:
+                        pass
+                yield f"data: {_j.dumps({'done': True, 'answer': full, 'session_id': session_id}, ensure_ascii=False)}\n\n"
+            except Exception as e:
+                import json as _j2
+                yield f"data: {_j2.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
+        return StreamingResponse(_gen(), media_type="text/event-stream")
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/clean")

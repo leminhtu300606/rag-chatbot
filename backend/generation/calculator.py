@@ -434,11 +434,11 @@ _COMPARISON_KEYWORDS = ["lớn hơn","lon hon","nhỏ hơn","nho hon","bé hơn"
 _MATH_OP_WORDS = [
     "cộng", "cong", "trừ", "tru", "nhân", "nhan", "chia",
     "mũ", "mu", "lũy thừa", "luy thua", "căn", "can", "căn bậc hai", "can bac hai",
-    "căn bậc ba", "can bac ba", "bình phương", "binh phuong", "lập phương", "lap phuong",
+    "căn bậc ba", "can bac ba", "căn bậc", "can bac", "bình phương", "binh phuong", "lập phương", "lap phuong",
     "phần trăm", "phan tram", "phần", "phan", "giai thừa", "giai thua",
-    "log", "ln", "sin", "cos", "tan", "sqrt", "exp",
+    "log", "ln", "logarit", "log10", "log2", "sin", "cos", "tan", "sqrt", "cbrt", "exp",
 ]
-_MATH_SYMBOLS_RE = re.compile(r"[0-9]+(?:[.,][0-9]+)?\s*[\+\-\*/%\^]+\s*[0-9]+")
+_MATH_SYMBOLS_RE = re.compile(r"[0-9]+(?:[.,][0-9]+)?\s*[\+\-\*/%\^×÷·•∶:²³]+\s*[0-9]+")
 _MATH_SYMBOL_CHARS = set("+-*/%^()")
 
 _STEPS_KEYWORDS = ["chi tiết", "chi tiet", "từng bước", "tung buoc", "các bước", "cac buoc", "bước", "buoc", "giải thích", "giai thich", "cách làm", "cach lam", "step by step", "show steps", "hiển thị bước", "hien thi buoc"]
@@ -456,19 +456,31 @@ def is_math_question(question: str, history=None, last_result=None) -> bool:
             # even without digit, if operator word alone with last_result -> math followup like "cộng thêm 2"
             if last_result is not None and any(kw in q_low for kw in ["cộng","cong","trừ","tru","nhân","nhan","chia","mũ","mu","thêm","them","bớt","bot"]):
                 return True
-            # "căn bậc hai của 16" etc
-            if w in ("căn","can","sqrt","log","sin","cos","tan"):
-                return True
+            # "căn bậc hai của 16" etc - cả khi chỉ có pi/e không có số (vd: "ln e", "sin pi")
+            if w in ("sqrt","cbrt","log","logarit","ln","log10","log2","sin","cos","tan","asin","acos","atan","exp"):
+                if any(k in q_low for k in ["pi"," e","e ", "e,","e.","e?","e!"]) or "pi" in q_low:
+                    return True
+                if any(ch.isdigit() for ch in q_low):
+                    return True
+            if w in ("căn","can"):
+                # "căn" chỉ tính là toán khi có "bậc" hoặc số hoặc sqrt/cbrt (tránh nhầm "căn nhà")
+                if any(k in q_low for k in ["bậc","bac","sqrt","cbrt"]) or any(ch.isdigit() for ch in q_low):
+                    return True
+                if any(k in q_low for k in ["pi"," e","e ", "e,"]):
+                    return True
     # contains math symbols with digits (including × ÷)
     if _MATH_SYMBOLS_RE.search(q_low):
         return True
-    # check for Unicode math symbols like × ÷ √ and factorial ! with digits
-    if any(sym in q_low for sym in ["×", "÷", "√"]) and any(ch.isdigit() for ch in q_low):
+    # check for Unicode math symbols like × ÷ √ · • ∶ : ²³ and factorial ! with digits
+    if any(sym in q_low for sym in ["×", "÷", "√", "·", "•", "∶", ":", "²", "³", "％", "！"]) and any(ch.isdigit() for ch in q_low):
         return True
     if re.search(r"\d\s*!\s*($|[^\d])", q_low):
         return True
-    # contains expression like "2+3", "3.5*2", "10/2", "5%","2^3" (including × ÷)
-    if re.search(r"\d\s*[\+\-\*/%\^×÷]\s*\d", q_low):
+    # contains expression like "2+3", "3.5*2", "10/2", "5%","2^3" (including × ÷ · • : )
+    if re.search(r"\d\s*[\+\-\*/%\^×÷·•∶:²³]\s*\d", q_low):
+        return True
+    # riêng ":" giữa hai số: "4:2" là chia
+    if re.search(r"\d\s*:\s*\d", q_low):
         return True
     # contains parentheses with numbers
     if re.search(r"\(\s*\d", q_low) and re.search(r"\d\s*\)", q_low):
@@ -480,9 +492,9 @@ def is_math_question(question: str, history=None, last_result=None) -> bool:
         # after replace, check if contains digits and at least one operator (symbol or Vietnamese word)
         has_digit = any(ch.isdigit() for ch in norm)
         # Check for symbols OR Vietnamese operator words still present in norm (e.g., "2 cộng 3")
-        has_op_symbol = any(ch in "+-*/%^" for ch in norm)
-        has_op_word = any(w in norm for w in ["cộng","cong","trừ","tru","nhân","nhan","chia","mũ","mu","căn","can","phần","phan","giai"])
-        has_op_func = any(kw in norm for kw in ["sqrt","cbrt","log","sin","cos","tan","factorial","exp","pow"])
+        has_op_symbol = any(ch in "+-*/%^×÷·•∶:²³" for ch in norm) or any(sym in q_low for sym in ["·","•","∶",":","²","³","×","÷","√"])
+        has_op_word = any(w in norm for w in ["cộng","cong","trừ","tru","nhân","nhan","chia","mũ","mu","căn","can","phần","phan","giai","bình phương","binh phuong","lập phương","lap phuong"])
+        has_op_func = any(kw in norm for kw in ["sqrt","cbrt","log","ln","log10","log2","sin","cos","tan","factorial","exp","pow","logarit"])
         has_op = has_op_symbol or has_op_word or has_op_func
         if has_digit and has_op:
             # ensure not too short false positive like "quy chế 3" -> has digit but no op
@@ -988,6 +1000,19 @@ _OP_MAP_SINGLE = {
     "×": "*",
     "÷": "/",
     "√": "sqrt",
+    "²": " **2 ",
+    "³": " **3 ",
+    "·": " * ",
+    "•": " * ",
+    "⋅": " * ",
+    "∶": " / ",
+    "＋": "+",
+    "－": "-",
+    "–": "-",
+    "—": "-",
+    "−": "-",
+    "％": "%",
+    "！": "!",
 }
 
 _OP_PHRASES = [
@@ -1038,6 +1063,10 @@ def normalize_expression(question: str, last_result: Decimal | str | None = None
         ("can bac hai", "sqrt"),
         ("căn bậc ba", "cbrt"),
         ("can bac ba", "cbrt"),
+        ("căn bậc 2", "sqrt"),
+        ("can bac 2", "sqrt"),
+        ("căn bậc 3", "cbrt"),
+        ("can bac 3", "cbrt"),
         ("bình phương", "**2"),
         ("binh phuong", "**2"),
         ("lập phương", "**3"),
@@ -1053,9 +1082,63 @@ def normalize_expression(question: str, last_result: Decimal | str | None = None
         pattern = r"\b" + re.escape(phrase) + r"\b"
         norm = re.sub(pattern, f" {repl} ", norm)
 
+    # Xử lý căn bậc N dạng số/chữ còn lại sau khi đã thay chữ -> số (vd: "căn bậc hai" đã thành sqrt, còn "căn bậc 2" đã thành sqrt, nhưng "căn bậc 4 của 16" cần thành pow)
+    # Để bắt cả "căn bậc 4 của 16" dạng chữ chưa chuyển: dùng regex sau khi đã replace VN numbers
+    # Tạm giữ để xử lý sau khi replace VN numbers
+
     # Now replace Vietnamese numbers
     try:
         norm = replace_vn_numbers(norm)
+    except Exception:
+        pass
+
+    # ── Xử lý căn bậc N tổng quát sau khi đã thay số chữ -> số (để bắt cả "căn bậc 4 của 16", "can bac 4 cua 16") ──
+    # Ví dụ: "căn bậc 2 của 4" -> "sqrt(4)", "căn bậc 3 của 27" -> "cbrt(27)", "căn bậc 4 của 16" -> "(16)**(1/4)"
+    try:
+        # Pattern với số N và số X (có thể có dấu ngoặc hoặc số thập phân)
+        def _root_repl(m):
+            n_str = m.group(1).strip()
+            x_str = m.group(2).strip()
+            # Chuẩn hoá x_str: thay , -> . nếu cần (để Decimal hiểu)
+            # Giữ nguyên để safe_eval xử lý sau, nhưng cần đảm bảo x_str là số
+            # Nếu N là 2 -> sqrt, 3 -> cbrt, khác -> pow
+            try:
+                n_val = int(float(n_str.replace(",", ".")))
+            except:
+                n_val = None
+            if n_val == 2:
+                return f" sqrt({x_str}) "
+            elif n_val == 3:
+                return f" cbrt({x_str}) "
+            elif n_val is not None and n_val != 0:
+                # Dùng pow: (x)**(1/n)
+                return f" ({x_str})**(1/{n_val}) "
+            else:
+                return m.group(0)
+        # Bắt "căn bậc N của X" hoặc "can bac N cua X" với N là số, X là số (có thể có ngoặc, dấu chấm/phẩy) - hỗ trợ cả có dấu và không dấu
+        norm = re.sub(r"\b(?:căn|can)\s*(?:bậc|bac)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:của|cua)?\s*\(?\s*(-?\d+(?:[.,]\d+)?)\s*\)?", _root_repl, norm)
+        # Bắt "căn bậc N X" không có "của" (vd: "căn bậc 2 4")
+        # Đã xử lý ở trên vì "của" là optional, nên cover luôn
+        # Xử lý "sqrt bậc N của X" còn sót sau khi "căn bậc 2" đã thành "sqrt" (do early replace): "sqrt bậc 2 của 4" -> "sqrt(4)"
+        norm = re.sub(r"\bsqrt\s*(?:bậc|bac)\s*2\s*(?:của|cua)?\s*\(?\s*(-?\d+(?:[.,]\d+)?)\s*\)?", r" sqrt(\1) ", norm)
+        norm = re.sub(r"\bsqrt\s*(?:bậc|bac)\s*3\s*(?:của|cua)?\s*\(?\s*(-?\d+(?:[.,]\d+)?)\s*\)?", r" cbrt(\1) ", norm)
+        norm = re.sub(r"\bcbrt\s*(?:bậc|bac)\s*3\s*(?:của|cua)?\s*\(?\s*(-?\d+(?:[.,]\d+)?)\s*\)?", r" cbrt(\1) ", norm)
+        # Dọn "bậc" còn sót sau khi căn đã thành sqrt: "sqrt bậc 4 của 16" -> "(16)**(1/4)"
+        def _sqrt_bac_repl(m):
+            n_str = m.group(1).strip()
+            x_str = m.group(2).strip()
+            try:
+                n_val = int(float(n_str.replace(",", ".")))
+            except:
+                return m.group(0)
+            if n_val == 2:
+                return f" sqrt({x_str}) "
+            elif n_val == 3:
+                return f" cbrt({x_str}) "
+            elif n_val != 0:
+                return f" ({x_str})**(1/{n_val}) "
+            return m.group(0)
+        norm = re.sub(r"\bsqrt\s*(?:bậc|bac)\s*([0-9]+)\s*(?:của|cua)?\s*\(?\s*(-?\d+(?:[.,]\d+)?)\s*\)?", _sqrt_bac_repl, norm)
     except Exception:
         pass
 
@@ -1132,6 +1215,21 @@ def normalize_expression(question: str, last_result: Decimal | str | None = None
 
     # Handle "x" as multiplication when between numbers/brackets
     norm = re.sub(r"(?<=[0-9\)])\s*[xX]\s*(?=[0-9\(])", " * ", norm)
+    # Handle ":" as division when between numbers: "4:2" -> "4/2"
+    norm = re.sub(r"(?<=\d)\s*:\s*(?=\d)", " / ", norm)
+    # Handle "·" "•" already via map, but ensure ":" variant "∶" already mapped
+    # Handle prefix forms that were converted to "**2 của X" etc: "bình phương của 5" -> "**2 của 5" -> "(5)**2"
+    try:
+        # "**2 của X" -> "(X)**2"  (X là số sau khi đã chuẩn hoá VN)
+        norm = re.sub(r"\*\*2\s*(?:của|cua)?\s*\(?\s*(-?\d+(?:[.,]\d+)?)\s*\)?", r" (\1)**2 ", norm)
+        norm = re.sub(r"\*\*3\s*(?:của|cua)?\s*\(?\s*(-?\d+(?:[.,]\d+)?)\s*\)?", r" (\1)**3 ", norm)
+        # "! của X" prefix -> "factorial(X)"  (ví dụ: "giai thừa của 5" -> "! của 5" -> "factorial(5)")
+        # Chỉ xử khi "!" ở đầu hoặc sau khoảng trắng và trước số, không phải "5!" hậu tố
+        norm = re.sub(r"(?:^|\s)!\s*(?:của|cua)?\s*\(?\s*(-?\d+(?:[.,]\d+)?)\s*\)?", r" factorial(\1) ", norm)
+        # "% của X" -> "% * X" để sau này "(5/100) * X" đúng
+        norm = re.sub(r"%\s*(?:của|cua)?\s*(?=\d|\()", "% * ", norm)
+    except Exception:
+        pass
 
     # Handle Vietnamese / English decimal comma and thousand separators per-number token
     # Instead of global replace, process each number token individually to handle mixed locales like "1.000,5 + 0.5"
@@ -1179,6 +1277,15 @@ def normalize_expression(question: str, last_result: Decimal | str | None = None
     # Find number tokens that contain digit + dot/comma
     norm = re.sub(r"\d[\d\.,]*", _normalize_number_token, norm)
 
+    # Chuẩn hoá logarit trước khi xóa filler: "logarit cơ số 2 của 8" -> "log(8,2)"
+    try:
+        norm = re.sub(r"\blogarit\s+cơ\s+số\s+(-?\d+(?:\.\d+)?)\s+của\s+(-?\d+(?:\.\d+)?)", r"log(\2, \1)", norm)
+        norm = re.sub(r"\blogarit\s+co\s+so\s+(-?\d+(?:\.\d+)?)\s+cua\s+(-?\d+(?:\.\d+)?)", r"log(\2, \1)", norm)
+        norm = re.sub(r"\blogarit\b", "log", norm)
+        norm = re.sub(r"\bloga\b", "log", norm)
+    except Exception:
+        pass
+
     # Remove filler words
     filler = ["tính","tinh","bằng","bang","là","la","bao nhiêu","bao nhieu","mấy","may","gì","gi","sao","kết quả","ket qua","hãy","hay","giúp","giup","tôi","toi","cho","với","voi","của","cua","được","duoc","ra","đi","di","một","mot","cái","cai","phép","phep","toán","toan","thì","thi","nhiêu","nhieu","b nhiêu","b nhieu"]
     for fw in filler:
@@ -1207,16 +1314,26 @@ def normalize_expression(question: str, last_result: Decimal | str | None = None
     # Handle factorial "!" : "5!" -> "factorial(5)"
     tmp = re.sub(r"(\d+(?:\.\d+)?|\))\s*!", r"factorial(\1)", tmp)
 
-    # Handle implicit sqrt/cbrt
-    tmp = re.sub(r"\bsqrt\s+(\d+(?:\.\d+)?)", r"sqrt(\1)", tmp)
-    tmp = re.sub(r"\bsqrt(\d)", r"sqrt(\1)", tmp)
-    tmp = re.sub(r"\bcbrt\s+(\d+(?:\.\d+)?)", r"cbrt(\1)", tmp)
+    # Handle implicit function calls: "log 100" -> "log(100)", "sin 0" -> "sin(0)", "logarit 100" -> "log(100)"
+    # Đầu tiên chuẩn hoá "logarit" -> "log"
+    tmp = re.sub(r"\blogarit\b", "log", tmp)
+    tmp = re.sub(r"\bloga\b", "log", tmp)
+    # Xử lý "log cơ số 2 của 8" -> "log(8,2)"
+    tmp = re.sub(r"\blog\s+cơ\s+số\s+(\d+(?:\.\d+)?)\s+của\s+(\d+(?:\.\d+)?)", r"log(\2, \1)", tmp)
+    tmp = re.sub(r"\blog\s+co\s+so\s+(\d+(?:\.\d+)?)\s+cua\s+(\d+(?:\.\d+)?)", r"log(\2, \1)", tmp)
+    # Xử lý "log 100" dạng không ngoặc -> "log(100)", áp dụng cho mọi hàm toán
+    for _func in ["sqrt","cbrt","log10","log2","log","ln","sin","cos","tan","asin","acos","atan","sinh","cosh","tanh","exp","abs","ceil","floor"]:
+        # có số hoặc hằng pi/e ngay sau hàm mà không có ngoặc
+        tmp = re.sub(rf"\b{_func}\s+(\d+(?:\.\d+)?)", rf"{_func}(\1)", tmp)
+        tmp = re.sub(rf"\b{_func}\s*\(\s*(\d+(?:\.\d+)?)\s*\)", rf"{_func}(\1)", tmp)  # chuẩn hoá khoảng trắng
+        # với hằng pi/e: "ln e" -> "ln(e)", "sin pi" -> "sin(pi)"
+        tmp = re.sub(rf"\b{_func}\s+(pi|e)\b", rf"{_func}(\1)", tmp)
 
     tmp = re.sub(r"\s+", " ", tmp).strip()
     if not any(ch.isdigit() for ch in tmp) and "pi" not in tmp and "e" not in tmp:
         return ""
 
-    has_op = any(op in tmp for op in ["+", "-", "*", "/", "%", "**", "sqrt", "cbrt", "log", "sin", "cos", "tan", "factorial", "pow", "exp"])
+    has_op = any(op in tmp for op in ["+", "-", "*", "/", "%", "**", "sqrt", "cbrt", "log", "ln", "log10", "log2", "sin", "cos", "tan", "asin", "acos", "atan", "factorial", "pow", "exp", "abs", "ceil", "floor"])
     if not has_op:
         if tmp.replace(".","").replace(" ","").isdigit():
             return ""

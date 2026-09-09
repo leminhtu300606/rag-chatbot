@@ -13,6 +13,8 @@ Nhiệm vụ:
   * summarize_history(): tóm tắt lịch sử hội thoại dài
 """
 import requests
+import time
+from functools import lru_cache
 
 from backend.config import (
     DEVICE,
@@ -32,6 +34,22 @@ from backend.config import (
     ENABLE_SOCIAL,
     SOCIAL_ALLOWLIST,
 )
+
+# Session tái sử dụng để giảm overhead kết nối
+_ollama_session = None
+def _get_ollama_session():
+    global _ollama_session
+    if _ollama_session is None:
+        _ollama_session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10, max_retries=1)
+        _ollama_session.mount("http://", adapter)
+        _ollama_session.mount("https://", adapter)
+    return _ollama_session
+
+# Cache đơn giản cho rewrite/summary để tránh gọi lại LLM cho câu giống nhau
+_rewrite_cache: dict = {}
+_summary_cache: dict = {}
+_CACHE_MAX = 200
 from .prompts import (
     SYSTEM_PROMPT,
     build_messages,
@@ -45,7 +63,7 @@ from .prompts import (
 _gen = None
 
 
-def _call_ollama(messages: list[dict], model: str, max_tokens: int, think: bool = False, temperature: float | None = None) -> str:
+def _call_ollama(messages: list[dict], model: str, max_tokens: int, think: bool = False, temperature: float | None = None, keep_alive: str = "5m") -> str:
     """Gọi Ollama /api/chat với danh sách messages và trả về nội dung trả lời."""
     options = {"num_predict": max_tokens}
     if temperature is not None:
@@ -55,10 +73,12 @@ def _call_ollama(messages: list[dict], model: str, max_tokens: int, think: bool 
         "messages": messages,
         "stream": False,
         "think": think,
+        "keep_alive": keep_alive,
         "options": options,
     }
     try:
-        resp = requests.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=600)
+        sess = _get_ollama_session()
+        resp = sess.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=120)
     except requests.exceptions.ConnectionError as e:
         raise RuntimeError(
             f"Không kết nối được Ollama tại {OLLAMA_BASE}. Hãy chạy 'ollama serve' và kiểm tra 'ollama list'. Chi tiết: {e}"
@@ -88,6 +108,40 @@ def _call_ollama(messages: list[dict], model: str, max_tokens: int, think: bool 
     return resp.json()["message"]["content"].strip()
 
 
+def _call_ollama_stream(messages: list[dict], model: str, max_tokens: int, think: bool = False, temperature: float | None = None):
+    """Gọi Ollama streaming, yield từng chunk text."""
+    options = {"num_predict": max_tokens}
+    if temperature is not None:
+        options["temperature"] = temperature
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+        "think": think,
+        "keep_alive": "5m",
+        "options": options,
+    }
+    try:
+        sess = _get_ollama_session()
+        resp = sess.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=120, stream=True)
+        resp.raise_for_status()
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            try:
+                import json as _json
+                data = _json.loads(line.decode("utf-8"))
+                chunk = data.get("message", {}).get("content", "")
+                if chunk:
+                    yield chunk
+                if data.get("done"):
+                    break
+            except Exception:
+                continue
+    except requests.exceptions.ConnectionError as e:
+        raise RuntimeError(f"Không kết nối được Ollama tại {OLLAMA_BASE}. Chi tiết: {e}") from e
+
+
 def _generate_ollama(context: list[dict], question: str, style: str | None = None) -> str:
     """Sinh câu trả lời đơn lượt qua Ollama."""
     messages = build_messages(context, question, style=style)
@@ -108,12 +162,26 @@ def _get_transformers_gen():
     global _gen
     if _gen is None:
         from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
-
+        import torch
         tok = AutoTokenizer.from_pretrained(LLM_MODEL)
+        # Tự chọn dtype tối ưu theo phần cứng
+        try:
+            if DEVICE in ("cuda", "cuda:0"):
+                dtype = torch.float16
+                device_map = "auto"
+            elif DEVICE == "mps":
+                dtype = torch.float16
+                device_map = "mps"
+            else:
+                dtype = "auto"
+                device_map = "cpu"
+        except Exception:
+            dtype = "auto"
+            device_map = DEVICE
         model = AutoModelForCausalLM.from_pretrained(
-            LLM_MODEL, torch_dtype="auto", device_map=DEVICE
+            LLM_MODEL, torch_dtype=dtype, device_map=device_map, low_cpu_mem_usage=True
         )
-        _gen = pipeline("text-generation", model=model, tokenizer=tok)
+        _gen = pipeline("text-generation", model=model, tokenizer=tok, device_map=device_map)
     return _gen
 
 
@@ -230,6 +298,7 @@ def rewrite_query(question: str, history: list[dict] | None) -> str:
     """Viết lại câu hỏi cuối thành dạng độc lập, đầy đủ ngữ nghĩa dựa trên lịch sử.
 
     Sử dụng LLM để viết lại. Nếu không cần thiết hoặc gặp lỗi thì trả về câu gốc.
+    Có cache để không gọi lại LLM cho câu giống nhau.
     """
     if not history or not question or not question.strip():
         return question
@@ -237,6 +306,14 @@ def rewrite_query(question: str, history: list[dict] | None) -> str:
     # Tối ưu: bỏ qua gọi LLM nếu câu hỏi đã đầy đủ
     if not _needs_rewrite(question, history):
         return question
+
+    # Cache: câu hỏi + 2 câu history gần nhất
+    try:
+        cache_key = (question.strip().lower(), tuple(m.get("content","")[:50] for m in history[-2:]))
+        if cache_key in _rewrite_cache:
+            return _rewrite_cache[cache_key]
+    except Exception:
+        cache_key = None
 
     model = REWRITE_MODEL or LLM_MODEL
     messages = build_rewrite_messages(history, question)
@@ -265,6 +342,14 @@ def rewrite_query(question: str, history: list[dict] | None) -> str:
         low_re = rewritten.lower()
         if any(p.strip() in low_re for p in [" nó ", " cái đó", " cái này", " trong đó", " ở trên"]):
             raise ValueError("rewrite still ambiguous")
+        # Lưu cache
+        try:
+            if cache_key is not None:
+                if len(_rewrite_cache) >= _CACHE_MAX:
+                    _rewrite_cache.pop(next(iter(_rewrite_cache)))
+                _rewrite_cache[cache_key] = rewritten
+        except Exception:
+            pass
         return rewritten
     except Exception:
         # Fallback heuristic: thay đại từ "nó", "cái đó"... bằng thực thể từ lịch sử đầu phiên để không mất câu đầu
@@ -329,6 +414,13 @@ def summarize_history(history: list[dict]) -> str:
     """Tóm tắt lịch sử hội thoại dài thành 4-6 câu ngắn gọn - nhớ từ đầu phiên, cân bằng."""
     if not history or len(history) <= 4:
         return ""
+    # Cache cho summary: hash theo ids nội dung
+    try:
+        s_key = tuple(m.get("content","")[:60] for m in history[:4] + history[-2:])
+        if s_key in _summary_cache:
+            return _summary_cache[s_key]
+    except Exception:
+        s_key = None
     model = SUMMARY_MODEL or LLM_MODEL
     messages = build_summary_messages(history)
     try:
@@ -340,11 +432,25 @@ def summarize_history(history: list[dict]) -> str:
             out = gen(prompt, max_new_tokens=SUMMARY_MAX_TOKENS, do_sample=False, return_full_text=False)
             summary = out[0]["generated_text"] .strip()
         # Tăng giới hạn để giữ ý từ đầu phiên
-        return summary.strip()[:900]
+        res = summary.strip()[:900]
+        try:
+            if s_key is not None:
+                if len(_summary_cache) >= _CACHE_MAX:
+                    _summary_cache.pop(next(iter(_summary_cache)))
+                _summary_cache[s_key] = res
+        except Exception:
+            pass
+        return res
     except Exception:
         # Fallback: nối các message đầu thành tóm tắt thô, giữ thứ tự từ đầu
         parts = [f"{m.get('role')}: {m.get('content','')[:90]}" for m in history[:8]]
-        return " | ".join(parts)[:700]
+        fb = " | ".join(parts)[:700]
+        try:
+            if s_key is not None:
+                _summary_cache[s_key] = fb
+        except Exception:
+            pass
+        return fb
 
 
 # ── Phát hiện đổi phong cách qua câu tự nhiên ──

@@ -26,9 +26,16 @@ logging.disable(logging.WARNING)
 
 from sentence_transformers import SentenceTransformer
 
+import backend.config as cfg
 from backend.config import DEVICE, EMBED_MODEL
 
 _model = None
+# Lấy batch size tối ưu theo phần cứng
+def _get_batch_size() -> int:
+    try:
+        return int(getattr(cfg, "EMBED_BATCH_SIZE", 32))
+    except Exception:
+        return 32
 
 
 def _get_model() -> SentenceTransformer:
@@ -57,10 +64,32 @@ def _get_model() -> SentenceTransformer:
     return _model
 
 
-def embed(texts):
+def embed(texts, batch_size: int | None = None, normalize: bool = True):
     if isinstance(texts, str):
         texts = [texts]
-    return _get_model().encode(texts, normalize_embeddings=True, show_progress_bar=False)
+    if not texts:
+        import numpy as np
+        return np.array([])
+    if batch_size is None:
+        batch_size = _get_batch_size()
+    # Tự động chia nhỏ nếu quá nhiều để tránh OOM
+    if len(texts) > batch_size * 4:
+        import numpy as np
+        parts = []
+        for i in range(0, len(texts), batch_size * 4):
+            chunk = texts[i:i + batch_size * 4]
+            emb = _get_model().encode(chunk, normalize_embeddings=normalize, show_progress_bar=False, batch_size=batch_size, convert_to_numpy=True)
+            parts.append(emb)
+        return np.concatenate(parts, axis=0) if parts else np.array([])
+    return _get_model().encode(texts, normalize_embeddings=normalize, show_progress_bar=False, batch_size=batch_size, convert_to_numpy=True)
+
+
+def warmup():
+    """Làm nóng model để request đầu không bị chậm."""
+    try:
+        _get_model().encode(["khởi động"], normalize_embeddings=True, show_progress_bar=False, batch_size=1)
+    except Exception:
+        pass
 
 
 def get_model_info() -> dict:

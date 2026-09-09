@@ -26,9 +26,17 @@ def get_client():
 
 
 def get_collection():
-    return get_client().get_or_create_collection(
-        name=cfg.COLLECTION_NAME, metadata={"hnsw:space": "cosine"}
-    )
+    # Tuning HNSW cho tiếng Việt: tăng M và ef để cân bằng tốc độ/chính xác
+    # Giữ tương thích: nếu collection đã tồn tại thì metadata cũ được giữ
+    hnsw_meta = {"hnsw:space": "cosine", "hnsw:M": 16, "hnsw:construction_ef": 200, "hnsw:search_ef": 64}
+    try:
+        return get_client().get_or_create_collection(
+            name=cfg.COLLECTION_NAME, metadata=hnsw_meta
+        )
+    except Exception:
+        return get_client().get_or_create_collection(
+            name=cfg.COLLECTION_NAME, metadata={"hnsw:space": "cosine"}
+        )
 
 
 def reset_collection():
@@ -39,7 +47,7 @@ def reset_collection():
     return get_collection()
 
 
-def add_chunks(chunks: list[dict]) -> None:
+def add_chunks(chunks: list[dict], batch_size: int = 500) -> None:
     """Upsert danh sach chunks + embeddings vao ChromaDB.
 
     Moi chunk dict can co:
@@ -47,14 +55,20 @@ def add_chunks(chunks: list[dict]) -> None:
       text: str (document)
       embedding: list[float]
       metadata: dict (da bao gom chunking results: chunk_index, chunk_mode, text_length...)
+    Tự chia nhỏ theo batch để tránh OOM khi nhiều chunk.
     """
+    if not chunks:
+        return
     col = get_collection()
-    col.upsert(
-        ids=[c["id"] for c in chunks],
-        documents=[c["text"] for c in chunks],
-        embeddings=[c["embedding"] for c in chunks],
-        metadatas=[c["metadata"] for c in chunks],
-    )
+    # Chia nhỏ để tránh quá tải RAM / Chroma
+    for i in range(0, len(chunks), batch_size):
+        batch = chunks[i:i + batch_size]
+        col.upsert(
+            ids=[c["id"] for c in batch],
+            documents=[c["text"] for c in batch],
+            embeddings=[c["embedding"] for c in batch],
+            metadatas=[c["metadata"] for c in batch],
+        )
 
 
 def count() -> int:

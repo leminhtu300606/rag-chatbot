@@ -51,7 +51,31 @@ COLLECTION_NAME = "rag_hvm"
 
 # ── PHẦN 3: Generation ──
 GEN_MAX_TOKENS = 512
-DEVICE = "cpu"
+# Tự động nhận phần cứng: ưu tiên GPU nếu có, cho phép ghi đè qua biến môi trường DEVICE
+def _detect_device() -> str:
+    import os
+    env = os.getenv("DEVICE", "").strip().lower()
+    if env in ("cpu", "cuda", "cuda:0", "mps"):
+        return env
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+        # Apple Silicon
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+    except Exception:
+        pass
+    return "cpu"
+
+DEVICE = _detect_device()
+# Có dùng GPU không (để các module khác tự quyết)
+USE_GPU = DEVICE in ("cuda", "cuda:0", "mps")
+# Batch size mặc định cho embedding/rerank (tăng khi có GPU)
+EMBED_BATCH_SIZE = 64 if USE_GPU else 32
+RERANK_BATCH_SIZE = 32 if USE_GPU else 16
+# OCR có dùng GPU không
+OCR_USE_GPU = USE_GPU
 
 # ── Hội thoại: quản lý ngữ cảnh ──
 # Cân bằng: nhớ từ đầu phiên, tốc độ + chính xác, nói thẳng khi không đủ nguồn

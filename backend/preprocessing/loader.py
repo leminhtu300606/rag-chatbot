@@ -18,23 +18,37 @@ PDF_TEXT_MIN = 50
 OCR_READER = None
 
 
+def _detect_ocr_gpu() -> bool:
+    try:
+        import backend.config as cfg
+        if hasattr(cfg, "OCR_USE_GPU"):
+            return bool(cfg.OCR_USE_GPU)
+    except Exception:
+        pass
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except Exception:
+        return False
+
 def _get_ocr():
     global OCR_READER
     if OCR_READER is None:
         import easyocr
         import warnings
+        use_gpu = _detect_ocr_gpu()
         # An thong bao "Using CPU. Note: This module is much faster with a GPU."
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             # easyocr verbose=False de khong in Using CPU
             try:
-                OCR_READER = easyocr.Reader(["vi"], gpu=False, verbose=False)
+                OCR_READER = easyocr.Reader(["vi"], gpu=use_gpu, verbose=False)
             except TypeError:
                 # fallback cho version cu khong co verbose
                 import io, contextlib
                 f = io.StringIO()
                 with contextlib.redirect_stdout(f), contextlib.redirect_stderr(f):
-                    OCR_READER = easyocr.Reader(["vi"], gpu=False)
+                    OCR_READER = easyocr.Reader(["vi"], gpu=use_gpu)
     return OCR_READER
 
 

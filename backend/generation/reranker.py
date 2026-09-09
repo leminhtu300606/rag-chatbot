@@ -15,6 +15,7 @@ from typing import Optional
 
 from sentence_transformers import CrossEncoder
 
+import backend.config as cfg
 from backend.config import DEVICE
 
 # Số kết quả tốt nhất giữ lại sau rerank
@@ -30,6 +31,20 @@ def _get_reranker() -> CrossEncoder:
     if _reranker is None:
         _reranker = CrossEncoder(RERANK_MODEL, device=DEVICE)
     return _reranker
+
+
+def _get_rerank_batch() -> int:
+    try:
+        return int(getattr(cfg, "RERANK_BATCH_SIZE", 16))
+    except Exception:
+        return 16
+
+
+def warmup():
+    try:
+        _get_reranker().predict([["khởi động", "khởi động"]])
+    except Exception:
+        pass
 
 
 def rerank(query: str, documents: list[dict], top_k: Optional[int] = None) -> list[dict]:
@@ -51,7 +66,10 @@ def rerank(query: str, documents: list[dict], top_k: Optional[int] = None) -> li
         top_k = DEFAULT_RERANK_TOP_K
 
     pairs = [[query, doc["text"]] for doc in documents]
-    scores = _get_reranker().predict(pairs)
+    try:
+        scores = _get_reranker().predict(pairs, batch_size=_get_rerank_batch(), show_progress_bar=False)
+    except TypeError:
+        scores = _get_reranker().predict(pairs)
 
     reranked = []
     for doc, score in zip(documents, scores):
