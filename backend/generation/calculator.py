@@ -398,6 +398,13 @@ _COMPARE_PHRASES = [
     ("nho hon", "<"),
     ("bé hơn", "<"),
     ("be hon", "<"),
+    # Hỗ trợ "lớn/nhỏ/bé" đơn (không có "hơn") như "4 lớn 1 hay không"
+    ("lớn", ">"),
+    ("lon", ">"),
+    ("nhỏ", "<"),
+    ("nho", "<"),
+    ("bé", "<"),
+    ("be", "<"),
     ("nhỏ nhất", "min"),  # placeholder, không dùng op nhưng để detect
     ("nho nhat", "min"),
     ("lớn nhất", "max"),
@@ -421,7 +428,7 @@ _COMPARE_SYMBOLS = [">=", "<=", "==", "!=", "<>", ">", "<", "="]
 _COMPARE_SYMBOL_RE = re.compile(r"(>=|<=|==|!=|<>|>|<|=)")
 
 # Từ khóa kích hoạt so sánh (dùng cho is_comparison_question nhanh)
-_COMPARISON_KEYWORDS = ["lớn hơn","lon hon","nhỏ hơn","nho hon","bé hơn","be hon","bằng nhau","bang nhau","bằng","bang","không bằng","khong bang","khác","khac","so sánh","so sanh","so với","so voi", ">", "<", "=", "≥", "≤", "≠"]
+_COMPARISON_KEYWORDS = ["lớn hơn","lon hon","nhỏ hơn","nho hon","bé hơn","be hon","lớn","lon","nhỏ","nho","bé","be","bằng nhau","bang nhau","bằng","bang","không bằng","khong bang","khác","khac","so sánh","so sanh","so với","so voi", ">", "<", "=", "≥", "≤", "≠"]
 
 # ── Math detection ──
 _MATH_OP_WORDS = [
@@ -534,6 +541,23 @@ def is_comparison_question(question: str, history=None, last_result=None) -> boo
     if not question or not question.strip():
         return False
     q_low = question.strip().lower()
+    # Nếu là câu tính dạng "1+1 = mấy" / "1+1 =" / "2+2 = bao nhiêu" (dấu = ở cuối không có số bên phải) thì không phải so sánh
+    # Đây là dạng "tính kết quả", không phải "so sánh"
+    if re.search(r"=\s*(mấy|may|bao nhiêu|bao nhieu|thì sao|thi sao|gì|gi|sao|\?)?\s*$", q_low):
+        before_eq = q_low.split("=")[0]
+        if re.search(r"\d\s*[\+\-\*/%×÷\^]\s*\d", before_eq):
+            after_eq = q_low.split("=", 1)[-1]
+            after_clean = re.sub(r"^\s*(mấy|may|bao nhiêu|bao nhieu|thì sao|thi sao|gì|gi|sao|\?|\s)*", "", after_eq, flags=re.IGNORECASE)
+            after_clean = after_clean.strip(" ?.!")
+            if not after_clean or not re.search(r"\d", after_clean):
+                return False
+        # Trường hợp "1+1 =" không có gì sau = cũng không phải so sánh
+        if q_low.strip().endswith("="):
+            before_eq2 = q_low.rsplit("=", 1)[0]
+            if re.search(r"\d\s*[\+\-\*/%×÷\^]\s*\d", before_eq2):
+                after_part = q_low.rsplit("=", 1)[-1].strip()
+                if not after_part or not re.search(r"\d", after_part):
+                    return False
     # Chứa ký hiệu so sánh unicode/ASCII với số
     if any(sym in q_low for sym in ["≥", "≤", "≠"]) and any(ch.isdigit() for ch in q_low):
         return True
@@ -647,7 +671,19 @@ def _normalize_comparison_raw(question: str, last_result=None) -> str:
     norm = q_low
     # Unicode compare symbols
     norm = norm.replace("≥", " >= ").replace("≤", " <= ").replace("≠", " != ").replace("＝", " = ")
-    # Thay cụm so sánh dài trước
+    # Loại bỏ hạt "không" cuối câu hỏi (tránh bị biến thành số 0) - phải làm trước khi thay số VN
+    norm = re.sub(r"\s+đúng\s+không\s*[\?\.\!]*\s*$", " ", norm)
+    norm = re.sub(r"\s+dung\s+khong\s*[\?\.\!]*\s*$", " ", norm)
+    norm = re.sub(r"\s+phải\s+không\s*[\?\.\!]*\s*$", " ", norm)
+    norm = re.sub(r"\s+phai\s+khong\s*[\?\.\!]*\s*$", " ", norm)
+    norm = re.sub(r"\s+không\s*[\?\.\!]*\s*$", " ", norm)
+    norm = re.sub(r"\s+khong\s*[\?\.\!]*\s*$", " ", norm)
+    # Thay số VN trước cụm so sánh để tránh gộp số khi "lớn hơn" -> ">" làm mất delimiter
+    try:
+        norm = replace_vn_numbers(norm)
+    except Exception:
+        pass
+    # Thay cụm so sánh dài trước (sau khi đã thay số VN)
     for phrase, op in sorted(_COMPARE_PHRASES, key=lambda x: len(x[0]), reverse=True):
         if op in ("min","max"):
             continue
@@ -657,19 +693,6 @@ def _normalize_comparison_raw(question: str, last_result=None) -> str:
         else:
             pattern = r"\b" + re.escape(phrase) + r"\b"
             norm = re.sub(pattern, f" {op} ", norm)
-    # Loại bỏ hạt "không" cuối câu hỏi (tránh bị biến thành số 0)
-    # Ví dụ "2,5 bằng nhau không?" -> sau khi thay "bằng nhau" thành "==" còn " không?" ở cuối
-    norm = re.sub(r"\s+đúng\s+không\s*[\?\.\!]*\s*$", " ", norm)
-    norm = re.sub(r"\s+dung\s+khong\s*[\?\.\!]*\s*$", " ", norm)
-    norm = re.sub(r"\s+phải\s+không\s*[\?\.\!]*\s*$", " ", norm)
-    norm = re.sub(r"\s+phai\s+khong\s*[\?\.\!]*\s*$", " ", norm)
-    norm = re.sub(r"\s+không\s*[\?\.\!]*\s*$", " ", norm)
-    norm = re.sub(r"\s+khong\s*[\?\.\!]*\s*$", " ", norm)
-    # Thay số VN
-    try:
-        norm = replace_vn_numbers(norm)
-    except Exception:
-        pass
     # Xử lý "âm 2,5" / "am 2.5" dạng số chữ + số Ả Rập (replace_vn_numbers chỉ xử chữ)
     norm = re.sub(r"\bâm\s+(-?\d)", r"-\1", norm)
     norm = re.sub(r"\bam\s+(-?\d)", r"-\1", norm)
@@ -745,12 +768,29 @@ def normalize_comparison(question: str, last_result=None):
         # Thử tìm 2 số trong norm và op ở cuối
         # Ví dụ "2.5 và 3.5 >" left_raw chứa cả 2 số, right_raw rỗng
         if not right_expr and left_expr:
-            # Có thể left_raw chứa 2 số: "2.5 và 3.5"
+            # Có thể left_raw chứa 2 biểu thức: "1+1 và 2+2" hoặc "2.5 và 3.5"
+            exprs_in_left = re.findall(expr_pat, left_raw)
+            if len(exprs_in_left) >= 2:
+                return (exprs_in_left[-2].strip(), op, exprs_in_left[-1].strip(), norm)
             nums_in_left = re.findall(r"-?\d+(?:\.\d+)?", left_raw)
             if len(nums_in_left) >= 2:
                 return (nums_in_left[-2], op, nums_in_left[-1], norm)
     # Không có op显式 hoặc không tách được -> thử generic "compare" hoặc hai số + từ khóa
     if "compare" in norm:
+        expr_pat_cmp = r"-?\d+(?:\.\d+)?(?:\s*[\+\-\*/%]\s*-?\d+(?:\.\d+)?)*"
+        exprs = re.findall(expr_pat_cmp, norm)
+        if len(exprs) >= 2:
+            cmp_pos = norm.find("compare")
+            before = norm[:cmp_pos]
+            after = norm[cmp_pos+len("compare"):]
+            exprs_before = re.findall(expr_pat_cmp, before)
+            exprs_after = re.findall(expr_pat_cmp, after)
+            if len(exprs_after) >= 2:
+                return (exprs_after[0].strip(), "compare", exprs_after[1].strip(), norm)
+            if len(exprs_after) == 1 and exprs_before:
+                return (exprs_before[-1].strip(), "compare", exprs_after[0].strip(), norm)
+            if len(exprs) >= 2:
+                return (exprs[0].strip(), "compare", exprs[1].strip(), norm)
         nums = re.findall(r"-?\d+(?:\.\d+)?", norm)
         if len(nums) >= 2:
             # Lấy 2 số đầu sau compare hoặc 2 số cuối nếu không rõ
@@ -769,10 +809,16 @@ def normalize_comparison(question: str, last_result=None):
                 return (nums[0], "compare", nums[1], norm)
     # Generic: có 2 số và có từ so sánh nhưng không có ký hiệu -> dạng "2,5 và 3,5 số nào lớn hơn"
     # Nếu norm chứa số và chứa từ lớn/nhỏ/bằng nhưng không có op symbol, coi như generic compare
+    # Thử với biểu thức trước (để bắt "1+1 và 2+2")
+    expr_pat_gen = r"-?\d+(?:\.\d+)?(?:\s*[\+\-\*/%]\s*-?\d+(?:\.\d+)?)*"
+    exprs_gen = re.findall(expr_pat_gen, norm)
+    has_cmp_word = any(w in norm for w in ["lớn hơn","lon hon","nhỏ hơn","nho hon","bé hơn","be hon","lớn","lon","nhỏ","nho","bé","be","bằng","bang","không bằng","khong bang","khác","khac"])
+    if len(exprs_gen) >= 2 and has_cmp_word:
+        return (exprs_gen[0].strip(), "compare", exprs_gen[1].strip(), norm)
     nums = re.findall(r"-?\d+(?:\.\d+)?", norm)
-    has_cmp_word = any(w in norm for w in ["lớn hơn","lon hon","nhỏ hơn","nho hon","bé hơn","be hon","bằng","bang","không bằng","khong bang","khác","khac"])
+    has_cmp_word2 = any(w in norm for w in ["lớn hơn","lon hon","nhỏ hơn","nho hon","bé hơn","be hon","bằng","bang","không bằng","khong bang","khác","khac"])
     # Nếu không có has_cmp_word nhưng có "compare" đã xử lý, còn lại chỉ còn trường hợp op bị miss
-    if len(nums) >= 2 and has_cmp_word:
+    if len(nums) >= 2 and has_cmp_word2:
         # Trả về generic để caller tự so và diễn đạt tự nhiên
         # Nhưng thử tìm op ẩn: nếu có "lớn hơn" thì caller đã chuyển thành > và đã xử lý ở nhánh trên
         # Nếu vẫn vào đây nghĩa là op chưa được chuyển (do thiếu khoảng trắng) -> thử lại
@@ -852,20 +898,14 @@ def _format_comparison_answer(left_str: str, op: str, right_str: str, left_dec: 
             if res:
                 return f"Kết quả là {left_fmt} {op_vi} {right_fmt} là đúng."
             else:
-                # Khi sai, nói quan hệ thực tế cho tự nhiên
-                if actual_sym == "==":
-                    return f"Kết quả là {left_fmt} {actual_vi} {right_fmt}, không {op_vi} nhau."
-                else:
-                    return f"Kết quả là {left_fmt} {actual_vi} {right_fmt}, không {op_vi} {right_fmt}."
+                # Khi sai: nói là sai ngay và đính chính quan hệ thực tế
+                return f"Sai, {left_fmt} {actual_vi} {right_fmt} ({left_fmt} {actual_sym} {right_fmt}), nên \"{left_fmt} {op_norm} {right_fmt}\" là sai."
         else:
             if res:
                 return f"Đúng, {left_fmt} {op_vi} {right_fmt} ({left_fmt} {op_norm} {right_fmt})."
             else:
-                if actual_sym == "==":
-                    # Trường hợp actual bằng nhưng op là >/<
-                    return f"Không, {left_fmt} {actual_vi} {right_fmt} ({left_fmt} {actual_sym} {right_fmt}), không {op_vi} {right_fmt}."
-                else:
-                    return f"Không, {left_fmt} {actual_vi} {right_fmt} ({left_fmt} {actual_sym} {right_fmt})."
+                # Khi sai: nói là sai ngay và đính chính, không nói đúng rồi mới sửa
+                return f"Sai, {left_fmt} {actual_vi} {right_fmt} ({left_fmt} {actual_sym} {right_fmt}), không {op_vi} {right_fmt}."
 
 def compare_real_numbers(question: str, last_result=None, style=None, want_steps: bool = False) -> dict:
     """So sánh hai số thực (hoặc biểu thức số) với độ chính xác Decimal.
@@ -1140,11 +1180,13 @@ def normalize_expression(question: str, last_result: Decimal | str | None = None
     norm = re.sub(r"\d[\d\.,]*", _normalize_number_token, norm)
 
     # Remove filler words
-    filler = ["tính","tinh","bằng","bang","là","la","bao nhiêu","bao nhieu","kết quả","ket qua","hãy","hay","giúp","giup","tôi","toi","cho","với","voi","của","cua","được","duoc","ra","đi","di","một","mot","cái","cai","phép","phep","toán","toan","và","va","thì","thi","là","la","nhiêu","nhieu","b nhiêu","b nhieu"]
+    filler = ["tính","tinh","bằng","bang","là","la","bao nhiêu","bao nhieu","mấy","may","gì","gi","sao","kết quả","ket qua","hãy","hay","giúp","giup","tôi","toi","cho","với","voi","của","cua","được","duoc","ra","đi","di","một","mot","cái","cai","phép","phep","toán","toan","thì","thi","nhiêu","nhieu","b nhiêu","b nhieu"]
     for fw in filler:
-        if len(fw) <= 2:
+        # Cho phép xóa cả từ 2 ký tự như "là", "mấy" khi trong ngữ cảnh toán
+        if len(fw) < 2:
             continue
         norm = re.sub(r"\b" + re.escape(fw) + r"\b", " ", norm)
+    # Giữ "và"/"va" làm dấu tách đa biểu thức, không xóa ở đây — xử lý tách ở hàm multi riêng
 
     # Handle power ^ -> **
     norm = norm.replace("^", "**")
@@ -1181,6 +1223,165 @@ def normalize_expression(question: str, last_result: Decimal | str | None = None
         return tmp if has_op else ""
 
     return tmp.strip()
+
+# ── Đa biểu thức: "kết quả của 1+1 và 2+2" -> tách thành ["1+1","2+2"] ──
+def _split_multi_expressions(question: str) -> list[str]:
+    """Tách câu có nhiều biểu thức nối bằng 'và', ',' , 'với'."""
+    q_low = question.lower()
+    # Chỉ tách khi có 'và'/'va'/','/'với' và mỗi phần chứa số
+    # Ví dụ: "kết quả của 1+1 và 2+2" -> ["kết quả của 1+1", "2+2"]
+    # Tách thô bằng regex giữ nguyên chữ
+    parts = re.split(r"\s+và\s+|\s+va\s+|,\s+|\s+với\s+|\s+voi\s+", q_low)
+    if len(parts) < 2:
+        return []
+    # Lọc: mỗi phần phải chứa số và (có toán tử hoặc là số đơn nhưng trong ngữ cảnh đa biểu thức)
+    # Yêu cầu ít nhất 2 phần có số
+    valid_parts = []
+    for p in parts:
+        # loại bỏ filler mở đầu như "kết quả của", "kết quả", "của"
+        p_clean = re.sub(r"^\s*(kết quả của|ket qua cua|kết quả|ket qua|của|cua)\s*", "", p).strip()
+        if re.search(r"\d", p_clean):
+            valid_parts.append(p_clean)
+    if len(valid_parts) >= 2:
+        # Trả về dạng gốc đã làm sạch nhẹ, giữ số + toán tử
+        return valid_parts
+    return []
+
+def is_multi_math_question(question: str, history=None, last_result=None) -> bool:
+    """Phát hiện câu hỏi chứa nhiều biểu thức như '1+1 và 2+2'."""
+    if not question or not question.strip():
+        return False
+    q_low = question.strip().lower()
+    # Cần có từ nối "và"/"," (với khoảng trắng) và ít nhất 2 số - tránh nhầm dấu phẩy thập phân "2,5"
+    if not any(sep in q_low for sep in [" và ", " va ", ", ", " với ", " voi "]):
+        return False
+    parts = _split_multi_expressions(question)
+    if len(parts) < 2:
+        return False
+    # Mỗi phần phải có khả năng là biểu thức toán học (có số + toán tử hoặc số đơn trong ngữ cảnh đa)
+    # Kiểm tra mỗi phần normalize được thành biểu thức có toán tử hoặc là số
+    math_parts = 0
+    for p in parts:
+        # Thử normalize, nếu ra biểu thức có toán tử thì tính
+        expr = normalize_expression(p, last_result=None)
+        if expr and any(ch in expr for ch in "+-*/%"):
+            math_parts += 1
+        elif re.search(r"\d", p) and any(op in p for op in ["+", "-", "*", "/", "×", "÷", "^", "%"]):
+            math_parts += 1
+        elif re.search(r"\d", p):
+            # Số đơn trong đa biểu thức cũng tính (ví dụ "1 và 2 số nào lớn hơn")
+            math_parts += 1
+    # Cần ít nhất 2 phần toán học
+    if math_parts >= 2:
+        # Loại trừ RAG: nếu chứa hint chuyên môn thì không phải
+        rag_hints = ["quy chế","quy định","quyết định","thông báo","tài liệu","học viện"]
+        if any(h in q_low for h in rag_hints):
+            return False
+        return True
+    return False
+
+def calculate_multi(question: str, last_result=None, style=None, want_steps: bool = False) -> dict:
+    """Xử lý đa biểu thức: liệt kê / cộng gộp / so sánh.
+    Returns dict: {success: bool, answer: str, results: list, expression: str, error: str}
+    """
+    try:
+        parts = _split_multi_expressions(question)
+        if len(parts) < 2:
+            return {"success": False, "error": "không tách được đa biểu thức", "expression": ""}
+        # Tính từng phần
+        eval_results = []
+        exprs = []
+        for p in parts:
+            # Loại bỏ đuôi so sánh/tổng như " cộng lại", " số nào lớn hơn" trước khi tính
+            # Trích biểu thức toán học đầu tiên trong phần để tránh lẫn chữ
+            p_candidate = p
+            # Tìm biểu thức có toán tử trước
+            m_expr = re.search(r"-?\d+(?:[.,]\d+)?(?:\s*[\+\-\*/%×÷\^]\s*-?\d+(?:[.,]\d+)?)+", p)
+            if m_expr:
+                p_candidate = m_expr.group(0)
+            else:
+                m_num = re.search(r"-?\d+(?:[.,]\d+)?", p)
+                if m_num:
+                    p_candidate = m_num.group(0)
+            expr = normalize_expression(p_candidate, last_result=None)
+            # Nếu normalize không ra (ví dụ "2" đơn), thử số thuần
+            if not expr:
+                # Thử lấy số thuần từ p_candidate
+                m = re.search(r"-?\d+(?:[.,]\d+)?", p_candidate)
+                if m:
+                    num_tok = m.group(0).replace(",", ".")
+                    try:
+                        dec = Decimal(num_tok)
+                        eval_results.append(dec)
+                        exprs.append(num_tok)
+                        continue
+                    except Exception:
+                        pass
+                return {"success": False, "error": f"không tính được phần '{p}'", "expression": p}
+            try:
+                dec = safe_eval(expr)
+                eval_results.append(dec)
+                exprs.append(expr)
+            except Exception as e:
+                return {"success": False, "error": f"lỗi phần '{p}': {e}", "expression": expr}
+        # Xác định kiểu: cộng gộp / so sánh / liệt kê
+        q_low = question.lower()
+        # Cộng gộp: "cộng lại", "tổng", "gộp", "cộng gộp", "cộng vào"
+        is_sum = any(kw in q_low for kw in ["cộng lại","cong lai","tổng","tong","gộp","gop","cộng gộp","cong gop","cộng vào","cong vao"])
+        # So sánh: chứa từ so sánh hoặc ký hiệu
+        is_cmp = any(kw in q_low for kw in ["lớn hơn","lon hon","nhỏ hơn","nho hon","bé hơn","be hon","lớn","lon","nhỏ","nho","bé","be","bằng","bang","so sánh","so sanh","so với","so voi", ">", "<", "=", "≥", "≤", "≠"]) and len(eval_results) >= 2
+        # Nếu có cả cộng và so sánh, ưu tiên so sánh nếu có từ so sánh rõ ràng, ngược lại cộng
+        has_cmp_word = any(kw in q_low for kw in ["lớn hơn","lon hon","nhỏ hơn","nho hon","bé hơn","be hon","so sánh","so sanh","lớn","lon","nhỏ","nho","bé","be"])
+        if has_cmp_word and len(eval_results) >= 2:
+            is_cmp = True
+            is_sum = False
+        if is_cmp and len(eval_results) >= 2:
+            # So sánh 2 kết quả đầu (mở rộng: nếu >2 thì so sánh lần lượt, nhưng hiện lấy 2 đầu)
+            left_dec = eval_results[0]
+            right_dec = eval_results[1]
+            left_str = exprs[0]
+            right_str = exprs[1]
+            # Dùng _format_comparison_answer để tạo câu tự nhiên
+            # Tạo op giả: "compare" nếu không có ký hiệu rõ
+            op = "compare"
+            # Tìm op thực tế trong câu
+            if any(kw in q_low for kw in ["lớn hơn","lon hon","lớn","lon"]):
+                op = ">"
+            elif any(kw in q_low for kw in ["nhỏ hơn","nho hon","nhỏ","nho","bé hơn","be hon","bé","be"]):
+                op = "<"
+            elif any(kw in q_low for kw in ["bằng nhau","bang nhau","bằng","bang"]):
+                op = "=="
+            # Nếu có ký hiệu
+            if ">=" in q_low or "≥" in q_low:
+                op = ">="
+            elif "<=" in q_low or "≤" in q_low:
+                op = "<="
+            elif "!=" in q_low or "≠" in q_low or "khác" in q_low or "khac" in q_low:
+                op = "!="
+            answer = _format_comparison_answer(left_str, op, right_str, left_dec, right_dec, style, question)
+            # Nếu là liệt kê so sánh nhiều hơn 2, thêm chi tiết
+            expr_display = f"{format_decimal(left_dec)} {op} {format_decimal(right_dec)}" if op != "compare" else f"{format_decimal(left_dec)} so với {format_decimal(right_dec)}"
+            return {"success": True, "answer": answer, "results": eval_results, "exprs": exprs, "expression": expr_display, "left": left_dec, "right": right_dec, "op": op}
+        elif is_sum:
+            total = sum(eval_results, Decimal(0))
+            # Hiển thị: "1+1 = 2, 2+2 = 4, tổng = 6" hoặc "2 + 4 = 6"
+            parts_str = ", ".join([f"{exprs[i]} = {format_decimal(eval_results[i])}" for i in range(len(exprs))])
+            total_str = format_decimal(total)
+            sum_expr = " + ".join([format_decimal(d) for d in eval_results])
+            answer = f"{parts_str}, tổng là {total_str} ({sum_expr} = {total_str})."
+            if style == "plain":
+                answer = f"Kết quả là {total_str}."
+            return {"success": True, "answer": answer, "results": eval_results, "exprs": exprs, "expression": sum_expr + f" = {total_str}", "result": total_str}
+        else:
+            # Liệt kê mặc định
+            parts_str = ", ".join([f"{exprs[i]} = {format_decimal(eval_results[i])}" for i in range(len(exprs))])
+            answer = f"{parts_str}."
+            if style == "plain":
+                # plain ngắn gọn
+                answer = f"Kết quả là {', '.join([format_decimal(d) for d in eval_results])}."
+            return {"success": True, "answer": answer, "results": eval_results, "exprs": exprs, "expression": ", ".join(exprs), "result": ", ".join([format_decimal(d) for d in eval_results])}
+    except Exception as e:
+        return {"success": False, "error": str(e), "expression": ""}
 
 def format_decimal(d: Decimal) -> str:
     # Highest precision, remove trailing zeros, plain fixed

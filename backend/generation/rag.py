@@ -22,13 +22,15 @@ from backend.indexing.retriever import retrieve
 from backend.generation.reranker import DEFAULT_RERANK_TOP_K, rerank
 
 try:
-    from backend.generation.calculator import is_math_question, is_math_request_steps, calculate, is_comparison_question, compare_real_numbers
+    from backend.generation.calculator import is_math_question, is_math_request_steps, calculate, is_comparison_question, compare_real_numbers, is_multi_math_question, calculate_multi
 except Exception:
     is_math_question = lambda *a, **kw: False
     is_math_request_steps = lambda *a, **kw: False
     calculate = lambda *a, **kw: {"success": False, "error": "calculator not loaded"}
     is_comparison_question = lambda *a, **kw: False
     compare_real_numbers = lambda *a, **kw: {"success": False, "error": "comparator not loaded"}
+    is_multi_math_question = lambda *a, **kw: False
+    calculate_multi = lambda *a, **kw: {"success": False, "error": "multi calculator not loaded"}
 
 
 def _prepare_history(
@@ -108,6 +110,56 @@ def answer(
         }
     effective_question = stripped if stripped and stripped.strip() else question
 
+    # Nhánh đa biểu thức: "kết quả của 1+1 và 2+2" -> liệt kê / cộng gộp / so sánh
+    try:
+        if is_multi_math_question(effective_question, None, last_math_result):
+            want_steps_multi = is_math_request_steps(effective_question, effective_style)
+            if effective_style == "plain":
+                want_steps_multi = False
+            multi = calculate_multi(effective_question, last_result=last_math_result, style=effective_style, want_steps=want_steps_multi)
+            if multi.get("success"):
+                # Phân biệt so sánh vs liệt kê/tổng
+                q_low_multi = effective_question.lower()
+                is_multi_cmp = any(kw in q_low_multi for kw in ["lớn hơn","lon hon","nhỏ hơn","nho hon","bé hơn","be hon","lớn","lon","nhỏ","nho","bé","be","bằng","bang","so sánh","so sanh","so với","so voi"])
+                # Nếu là so sánh thì đánh dấu comparison để không ghi đè last_math_result
+                if is_multi_cmp and multi.get("left") is not None:
+                    return {
+                        "answer": multi.get("answer"),
+                        "sources": [],
+                        "context": [],
+                        "style": effective_style,
+                        "standalone_question": multi.get("expression") or effective_question,
+                        "history_used": None,
+                        "summary": None,
+                        "math_result": str(multi.get("left")) + (" " + multi.get("op") + " " if multi.get("op") != "compare" else " so với ") + str(multi.get("right")) if multi.get("op") else multi.get("result"),
+                        "math_expression": multi.get("expression") or effective_question,
+                        "comparison_result": multi.get("left") > multi.get("right") if multi.get("op") == ">" else (multi.get("left") < multi.get("right") if multi.get("op") == "<" else None),
+                        "comparison_answer": multi.get("answer"),
+                        "comparison_left": str(multi.get("left")),
+                        "comparison_right": str(multi.get("right")),
+                    }
+                else:
+                    # Liệt kê hoặc tổng: lưu kết quả cuối/tổng làm math_result để nhớ
+                    res_val = multi.get("result")
+                    # Nếu liệt kê nhiều kết quả, lấy kết quả cuối để làm last_math_result
+                    last_val = res_val
+                    if last_val and "," in str(last_val):
+                        # "2, 4" -> lấy cuối
+                        last_val = str(last_val).split(",")[-1].strip()
+                    return {
+                        "answer": multi.get("answer"),
+                        "sources": [],
+                        "context": [],
+                        "style": effective_style,
+                        "standalone_question": multi.get("expression") or effective_question,
+                        "history_used": None,
+                        "summary": None,
+                        "math_result": last_val,
+                        "math_expression": multi.get("expression") or effective_question,
+                    }
+    except Exception:
+        pass
+
     # Nhánh so sánh số thực: ưu tiên trước toán học thường, trả lời tự nhiên không kiểu gọi hàm
     if is_comparison_question(effective_question, None, last_math_result):
         want_steps = is_math_request_steps(effective_question, effective_style)
@@ -138,16 +190,17 @@ def answer(
                 "comparison_right": comp.get("right"),
             }
         else:
-            if comp.get("expression"):
-                return {
-                    "answer": f"Không so sánh được `{comp.get('expression','')}`. Lỗi: {comp.get('error','không rõ')}. Vui lòng kiểm tra lại hai số cần so sánh.",
-                    "sources": [],
-                    "context": [],
-                    "style": effective_style,
-                    "standalone_question": comp.get("expression"),
-                    "history_used": None,
-                    "summary": None,
-                }
+            # Khi so sánh lỗi (kể cả không trích được số), báo lỗi ngay, không rơi xuống LLM/RAG để tránh "Đúng rồi... nhưng"
+            expr = comp.get("expression") or effective_question
+            return {
+                "answer": f"Không so sánh được `{expr}`. Lỗi: {comp.get('error','không rõ')}. Vui lòng kiểm tra lại hai số cần so sánh (vd: '2,5 > 3 ?' hoặc '2,5 lớn hơn 3 không?').",
+                "sources": [],
+                "context": [],
+                "style": effective_style,
+                "standalone_question": expr,
+                "history_used": None,
+                "summary": None,
+            }
 
     # Nhánh toán học: ưu tiên trước xã giao, độ chính xác cao Decimal prec=50, hỗ trợ chữ->số và last_result
     if is_math_question(effective_question, None, last_math_result):
@@ -295,6 +348,51 @@ def answer_with_history(
             "style": effective_style,
         }
 
+    # Nhánh đa biểu thức (hội thoại): "kết quả của 1+1 và 2+2" -> liệt kê / cộng gộp / so sánh
+    try:
+        if is_multi_math_question(effective_question, history_window if history_window else history, last_math_result):
+            want_steps_multi = is_math_request_steps(effective_question, effective_style)
+            if effective_style == "plain":
+                want_steps_multi = False
+            multi = calculate_multi(effective_question, last_result=last_math_result, style=effective_style, want_steps=want_steps_multi)
+            if multi.get("success"):
+                q_low_multi = effective_question.lower()
+                is_multi_cmp = any(kw in q_low_multi for kw in ["lớn hơn","lon hon","nhỏ hơn","nho hon","bé hơn","be hon","lớn","lon","nhỏ","nho","bé","be","bằng","bang","so sánh","so sanh","so với","so voi"])
+                if is_multi_cmp and multi.get("left") is not None:
+                    return {
+                        "answer": multi.get("answer"),
+                        "sources": [],
+                        "context": [],
+                        "standalone_question": multi.get("expression") or effective_question,
+                        "summary": summary,
+                        "history_used": history_window,
+                        "style": effective_style,
+                        "math_result": str(multi.get("left")) + (" " + multi.get("op") + " " if multi.get("op") != "compare" else " so với ") + str(multi.get("right")) if multi.get("op") else multi.get("result"),
+                        "math_expression": multi.get("expression") or effective_question,
+                        "comparison_result": multi.get("left") > multi.get("right") if multi.get("op") == ">" else (multi.get("left") < multi.get("right") if multi.get("op") == "<" else None),
+                        "comparison_answer": multi.get("answer"),
+                        "comparison_left": str(multi.get("left")),
+                        "comparison_right": str(multi.get("right")),
+                    }
+                else:
+                    res_val = multi.get("result")
+                    last_val = res_val
+                    if last_val and "," in str(last_val):
+                        last_val = str(last_val).split(",")[-1].strip()
+                    return {
+                        "answer": multi.get("answer"),
+                        "sources": [],
+                        "context": [],
+                        "standalone_question": multi.get("expression") or effective_question,
+                        "summary": summary,
+                        "history_used": history_window,
+                        "style": effective_style,
+                        "math_result": last_val,
+                        "math_expression": multi.get("expression") or effective_question,
+                    }
+    except Exception:
+        pass
+
     # Nhánh so sánh số thực (hội thoại) - ưu tiên trước toán học, trả lời tự nhiên không kiểu gọi hàm
     if is_comparison_question(effective_question, history_window if history_window else history, last_math_result):
         want_steps = is_math_request_steps(effective_question, effective_style)
@@ -323,18 +421,17 @@ def answer_with_history(
                 "comparison_right": comp.get("right"),
             }
         else:
-            if comp.get("expression") or comp.get("error") != "không trích được cặp số để so sánh":
-                # Chỉ báo lỗi nếu có expression, tránh nhầm với RAG đơn số
-                if comp.get("expression"):
-                    return {
-                        "answer": f"Không so sánh được `{comp.get('expression','')}`. Lỗi: {comp.get('error','không rõ')}. Vui lòng kiểm tra lại hai số cần so sánh.",
-                        "sources": [],
-                        "context": [],
-                        "standalone_question": comp.get("expression"),
-                        "summary": summary,
-                        "history_used": history_window,
-                        "style": effective_style,
-                    }
+            # Khi so sánh lỗi (kể cả không trích được số), báo lỗi ngay, không rơi xuống LLM/RAG để tránh "Đúng rồi... nhưng"
+            expr = comp.get("expression") or effective_question
+            return {
+                "answer": f"Không so sánh được `{expr}`. Lỗi: {comp.get('error','không rõ')}. Vui lòng kiểm tra lại hai số cần so sánh (vd: '2,5 > 3 ?' hoặc '2,5 lớn hơn 3 không?').",
+                "sources": [],
+                "context": [],
+                "standalone_question": expr,
+                "summary": summary,
+                "history_used": history_window,
+                "style": effective_style,
+            }
 
     # Nhánh toán học: hỗ trợ toàn bộ ký tự, chữ->số, nhớ last_result, chỉ hiện steps khi yêu cầu
     if is_math_question(effective_question, history_window if history_window else history, last_math_result):

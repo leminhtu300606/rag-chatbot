@@ -399,12 +399,12 @@ async def chat(req: ChatRequest):
     is_social_early = False
     try:
         from backend.generation.generator import is_social_question, is_history_recall_question
-        from backend.generation.calculator import is_math_question, is_comparison_question
+        from backend.generation.calculator import is_math_question, is_comparison_question, is_multi_math_question
         _lr_early = None
         if req.session_id and req.session_id.strip():
             with _sessions_lock:
                 _lr_early = _sessions.get(req.session_id.strip(), {}).get("last_math_result")
-        is_social_early = is_social_question(req.question, None) or is_history_recall_question(req.question) or is_math_question(req.question, None, _lr_early) or is_comparison_question(req.question, None, _lr_early)
+        is_social_early = is_social_question(req.question, None) or is_history_recall_question(req.question) or is_math_question(req.question, None, _lr_early) or is_comparison_question(req.question, None, _lr_early) or is_multi_math_question(req.question, None, _lr_early)
     except Exception:
         pass
     if not is_social_early:

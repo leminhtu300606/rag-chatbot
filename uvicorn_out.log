@@ -1,0 +1,16 @@
+[sessions] loaded 5 from E:\test\data\sessions.json
+
+============================================================
+ RAG Chatbot - Hoc vien Ky thuat Mat ma - DA SAN SANG
+============================================================
+  Frontend  : http://127.0.0.1:8000/
+  API Docs  : http://127.0.0.1:8000/docs
+  API Health: http://127.0.0.1:8000/api/health
+  API Stats : http://127.0.0.1:8000/api/stats
+  API Chat  : POST http://127.0.0.1:8000/api/chat
+============================================================
+  LLM       : ollama/qwen2.5 @ http://localhost:11434
+  Embed     : BAAI/bge-m3
+  Data      : xem /api/health de biet so files/vectors
+============================================================
+

@@ -338,7 +338,7 @@ def summarize_history(history: list[dict]) -> str:
             gen = _get_transformers_gen()
             prompt = "\n\n".join(f"{m['role']}: {m['content']}" for m in messages)
             out = gen(prompt, max_new_tokens=SUMMARY_MAX_TOKENS, do_sample=False, return_full_text=False)
-            summary = out[0]["generated_text"].strip()
+            summary = out[0]["generated_text"] .strip()
         # Tăng giới hạn để giữ ý từ đầu phiên
         return summary.strip()[:900]
     except Exception:
