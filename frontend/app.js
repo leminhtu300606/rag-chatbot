@@ -817,10 +817,14 @@ async function send(){
     const histInfo = j.history_used ? ` • hist:${j.history_used.length/2|0}` : "";
     const rewriteBadge = j.standalone_question && j.standalone_question !== q ? `<span class="tool" title="${escapeHtml(j.standalone_question)}">🔁 đã rewrite</span>` : "";
     const isMath = j.math_result !== undefined && j.math_result !== null;
+    const isSocial = j.is_social === true;
     const mathBadge = isMath ? `<span class="tool" title="${escapeHtml(j.math_expression||j.standalone_question||"")} = ${escapeHtml(j.math_result)}">🧮 ${escapeHtml(j.math_expression||j.standalone_question||"")} = ${escapeHtml(j.math_result)}</span>` : "";
-    const sourceBadge = isMath ? `<span class="tool">🧮 calculator • Decimal prec=50</span>` : `<span class="tool">✅ ${j.sources.length} nguồn</span>`;
+    const sourceBadge = isMath ? `<span class="tool">🧮 calculator • Decimal prec=50</span>` : (isSocial ? `<span class="tool">💬 xã giao • không cần nguồn</span>` : `<span class="tool">✅ ${j.sources.length} nguồn</span>`);
     bubble.innerHTML=`<span class="answer-text"></span><div class="meta">${sourceBadge}<span class="tool">parquet • rerank top3${histInfo}</span>${mathBadge}${rewriteBadge}</div>`;
-     if(j.sources && j.sources.length){
+     if(isSocial){
+      sourcesEl.innerHTML='<p class="hint">💬 Cuộc trò chuyện xã giao, không cần tài liệu chứng minh.</p>';
+      const rp=$("#right-panel"); if(rp) rp.style.display="flex";
+    } else if(j.sources && j.sources.length){
       sourcesEl.innerHTML=j.sources.map(s=>{
         const sec=(s.section||"").trim();
         const page=s.page;

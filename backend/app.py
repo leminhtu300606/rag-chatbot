@@ -364,6 +364,7 @@ class ChatResponse(BaseModel):
     style: Optional[str] = None  # phong cách hiện tại của phiên
     math_result: Optional[str] = None
     math_expression: Optional[str] = None
+    is_social: bool = False  # True nếu là câu xã giao, không cần tài liệu chứng minh
 
 # --- Helpers ---
 def _get_stats():
@@ -708,6 +709,7 @@ async def chat(req: ChatRequest, request: Request):
                 pass
             # Cập nhật style từ kết quả nếu có (phát hiện đổi phong cách)
             final_style = res.get("style", effective_style)
+            is_social_res = res.get("is_social", False)
             # Xử lý so sánh trước toán học: giữ last_math_result cũ (không ghi đè bằng biểu thức so sánh)
             if "comparison_answer" in res:
                 comp_math_res = res.get("math_result")
@@ -728,6 +730,7 @@ async def chat(req: ChatRequest, request: Request):
                     style=final_style,
                     math_result=comp_math_res,
                     math_expression=res.get("math_expression") or res.get("standalone_question"),
+                    is_social=is_social_res,
                 )
             # Lưu vào session sau khi có kết quả (kèm style, summary và last_math_result nếu là toán)
             math_res = res.get("math_result")
@@ -755,6 +758,21 @@ async def chat(req: ChatRequest, request: Request):
                     style=final_style,
                     math_result=math_res,
                     math_expression=res.get("math_expression") or res.get("standalone_question"),
+                    is_social=is_social_res,
+                )
+
+            # Xã giao: không cần tài liệu chứng minh
+            if is_social_res:
+                return ChatResponse(
+                    answer=res["answer"],
+                    sources=[],
+                    context=[] if req.show_context else None,
+                    session_id=session_id,
+                    standalone_question=res.get("standalone_question"),
+                    summary=res.get("summary"),
+                    history_used=res.get("history_used"),
+                    style=final_style,
+                    is_social=True,
                 )
 
             if not res.get("context"):
@@ -769,6 +787,7 @@ async def chat(req: ChatRequest, request: Request):
                         summary=res.get("summary"),
                         history_used=res.get("history_used"),
                         style=final_style,
+                        is_social=is_social_res,
                     )
                 return ChatResponse(
                     answer="Chua co du lieu de tra loi. Vui long chay: python -m backend.clean && python -m backend.index --rebuild, sau do thu lai.",
@@ -779,6 +798,7 @@ async def chat(req: ChatRequest, request: Request):
                     summary=res.get("summary"),
                     history_used=res.get("history_used"),
                     style=final_style,
+                    is_social=is_social_res,
                 )
             context = res.get("context", []) if req.show_context else None
             return ChatResponse(
@@ -790,6 +810,7 @@ async def chat(req: ChatRequest, request: Request):
                 summary=res.get("summary"),
                 history_used=res.get("history_used"),
                 style=final_style,
+                is_social=is_social_res,
             )
         else:
             # Chế độ đơn lượt (không dùng lịch sử) - vẫn hỗ trợ toán học với last_math_result
@@ -813,6 +834,7 @@ async def chat(req: ChatRequest, request: Request):
             except Exception:
                 pass
             final_style = res.get("style", effective_style)
+            is_social_res_single = res.get("is_social", False)
             # So sánh đơn lượt: không ghi đè last_math_result bằng biểu thức so sánh
             if "comparison_answer" in res:
                 comp_math_res = res.get("math_result")
@@ -828,8 +850,22 @@ async def chat(req: ChatRequest, request: Request):
                     style=final_style,
                     math_result=comp_math_res,
                     math_expression=res.get("math_expression") or res.get("standalone_question"),
+                    is_social=is_social_res_single,
                 )
             math_res_single = res.get("math_result")
+            if is_social_res_single:
+                if session_id:
+                    _append_to_session(session_id, req.question, res["answer"], style=final_style)
+                    _save_sessions()
+                return ChatResponse(
+                    answer=res["answer"],
+                    sources=[],
+                    context=[] if req.show_context else None,
+                    session_id=session_id,
+                    standalone_question=res.get("standalone_question"),
+                    style=final_style,
+                    is_social=True,
+                )
             if not res.get("context"):
                 # Nếu là toán học hoặc social/style thì vẫn trả về ngay (không cần context)
                 if res.get("math_result") is not None:
@@ -848,6 +884,7 @@ async def chat(req: ChatRequest, request: Request):
                         style=final_style,
                         math_result=math_res_single,
                         math_expression=res.get("math_expression") or res.get("standalone_question"),
+                        is_social=is_social_res_single,
                     )
                 # Nếu chỉ đổi phong cách
                 if res.get("style") and not res.get("context"):
@@ -861,6 +898,7 @@ async def chat(req: ChatRequest, request: Request):
                             context=[] if req.show_context else None,
                             session_id=session_id,
                             style=final_style,
+                            is_social=is_social_res_single,
                         )
                 return ChatResponse(
                     answer="Chua co du lieu de tra loi. Vui long chay: python -m backend.clean && python -m backend.index --rebuild, sau do thu lai.",
@@ -868,6 +906,7 @@ async def chat(req: ChatRequest, request: Request):
                     context=[] if req.show_context else None,
                     session_id=session_id,
                     style=final_style,
+                    is_social=is_social_res_single,
                 )
             context = None
             if req.show_context:
@@ -898,6 +937,7 @@ async def chat(req: ChatRequest, request: Request):
                 style=final_style,
                 math_result=res.get("math_result"),
                 math_expression=res.get("math_expression"),
+                is_social=res.get("is_social", False),
             )
     except HTTPException:
         raise

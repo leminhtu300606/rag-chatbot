@@ -249,7 +249,7 @@ def answer(
                     "summary": None,
                 }
 
-    # Nhánh xã giao: không cần nguồn, dùng kiến thức huấn luyện, mặc định casual
+    # Nhánh xã giao: không cần nguồn, không cần tài liệu chứng minh
     if is_social_question(effective_question):
         # Nếu chưa có style riêng, dùng casual cho xã giao
         social_style = effective_style if effective_style in ["casual", "friendly", "humorous", "empathetic"] else "casual"
@@ -264,6 +264,7 @@ def answer(
             "sources": [],
             "context": [],
             "style": social_style,
+            "is_social": True,
         }
 
     if top_k is None:
@@ -485,8 +486,7 @@ def answer_with_history(
                     "style": effective_style,
                 }
 
-    # Nhánh xã giao mở rộng: nếu câu là xã giao đời thường thì không cần nguồn, trả lời tự nhiên
-    # Chỉ cung cấp ngoài lề khi có nguồn chính xác hoặc kiến thức huấn luyện -> cho phép dùng generate_social
+    # Nhánh xã giao mở rộng: nếu câu là xã giao đời thường thì không cần nguồn, không cần tài liệu chứng minh
     if is_social_question(effective_question, history):
         # Chọn phong cách xã giao: mặc định casual, nếu người dùng đã chọn friendly/humorous thì giữ
         social_style = effective_style
@@ -502,6 +502,7 @@ def answer_with_history(
             "summary": summary,
             "history_used": history_window,
             "style": social_style,
+            "is_social": True,
         }
 
     # Viết lại câu hỏi để retrieval chính xác hơn (dùng câu đã tách)

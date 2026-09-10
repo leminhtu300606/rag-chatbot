@@ -515,6 +515,94 @@ def strip_style_instruction(question: str) -> str:
 # ── Xã giao mở rộng ──
 _SOCIAL_PROFESSIONAL_HINTS = ["quy chế", "quy định", "quyết định", "thông báo", "tài liệu", "học viện", "kỹ thuật mật mã", "đào tạo", "khảo thí", "học bổng", "tốt nghiệp", "tín chỉ"]
 
+# Cache cho phân loại xã giao bằng LLM để tránh gọi lại
+_social_llm_cache: dict = {}
+_SOCIAL_LLM_CACHE_MAX = 300
+
+def _strip_accents(s: str) -> str:
+    """Bỏ dấu tiếng Việt để so sánh không dấu."""
+    try:
+        import unicodedata
+        return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+    except Exception:
+        return s
+
+def _normalize_for_match(s: str) -> str:
+    return _strip_accents(s.lower())
+
+def _is_social_llm(question: str) -> bool | None:
+    """Dùng LLM để phân loại câu xã giao (cách 1).
+
+    Trả về True/False nếu LLM trả lời rõ ràng, None nếu lỗi/timeout để fallback.
+    Prompt rất ngắn để nhanh và rẻ.
+    """
+    try:
+        q = (question or "").strip()
+        if not q or len(q) > 500:
+            return None
+        cache_key = q.lower()
+        if cache_key in _social_llm_cache:
+            return _social_llm_cache[cache_key]
+        # Prompt phân loại ngắn gọn - yêu cầu chỉ trả lời YES/NO
+        # Bao gồm cả trò chuyện đời thường/tâm sự để LLM hiểu rộng hơn
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are intent classifier. Classify as SOCIAL if greeting, thanks, goodbye, health check, introduction, wishes, storytelling, jokes, small talk, casual chat, sharing feelings. "
+                    "Classify as NOT SOCIAL if about regulations, procedures, documents, study, formal info. "
+                    "Answer only YES for SOCIAL, NO for NOT SOCIAL."
+                ),
+            },
+            {"role": "user", "content": f'"{q}" -> YES or NO?'},
+        ]
+        # Dùng model chính, timeout ngắn để không chặn lâu
+        # num_predict nhỏ vì chỉ cần 1 từ
+        try:
+            from backend.config import OLLAMA_BASE as _BASE, LLM_MODEL as _MODEL
+            import requests as _rq
+            sess = _get_ollama_session()
+            payload = {
+                "model": _MODEL,
+                "messages": messages,
+                "stream": False,
+                "think": False,
+                "keep_alive": "5m",
+                "options": {"num_predict": 5, "temperature": 0.0},
+            }
+            resp = sess.post(f"{_BASE}/api/chat", json=payload, timeout=20)
+            if resp.status_code != 200:
+                return None
+            ans = resp.json().get("message", {}).get("content", "").strip().lower()
+            # Lấy từ đầu tiên
+            first = ans.split()[0] if ans else ""
+            first = first.strip('.,:;!?"\'')
+            result = None
+            if first == "yes":
+                result = True
+            elif first == "no":
+                result = False
+            else:
+                # Nếu LLM trả lời dài, tìm yes/no trong đó
+                if "yes" in ans and "no" not in ans:
+                    result = True
+                elif "no" in ans and "yes" not in ans:
+                    result = False
+                else:
+                    return None
+            # Cache
+            try:
+                if len(_social_llm_cache) >= _SOCIAL_LLM_CACHE_MAX:
+                    _social_llm_cache.pop(next(iter(_social_llm_cache)))
+                _social_llm_cache[cache_key] = result
+            except Exception:
+                pass
+            return result
+        except Exception:
+            return None
+    except Exception:
+        return None
+
 def is_history_recall_question(question: str) -> bool:
     """Phát hiện câu hỏi yêu cầu nhớ lại lịch sử hội thoại (câu đầu tiên, vừa hỏi gì...).
     Những câu này cần ưu tiên lịch sử thay vì ngữ cảnh retrieve."""
@@ -545,36 +633,40 @@ def is_history_recall_question(question: str) -> bool:
     return False
 
 def is_social_question(question: str, history: list[dict] | None = None) -> bool:
-    """Nhận diện câu xã giao đời thường để đi nhánh không cần nguồn.
-    Chỉ cung cấp ngoài lề khi có nguồn chính xác hoặc kiến thức huấn luyện -> nhánh xã giao cho phép dùng kiến thức chung."""
+    """Nhận diện câu xã giao đời thường để đi nhánh không cần nguồn (cách 1: LLM + fallback).
+
+    Luồng tối ưu latency:
+    1. Lọc nhanh: recall / từ chuyên môn (có/không dấu) / đại từ tham chiếu -> không phải xã giao.
+    2. Kiểm tra allowlist nhanh (có/không dấu) -> nếu khớp thì xã giao ngay, không cần LLM.
+    3. Chỉ với câu mơ hồ (không khớp allowlist và không phải chuyên môn) mới hỏi LLM.
+    4. Nếu LLM lỗi/timeout -> coi như không phải xã giao (an toàn, sẽ đi nhánh RAG).
+    """
     if not ENABLE_SOCIAL:
         return False
     if not question or not question.strip():
         return False
-    q_low = question.strip().lower()
-    # Nếu là câu recall lịch sử thì không coi là xã giao (cần trả lời từ lịch sử)
     if is_history_recall_question(question):
         return False
-    # Nếu chứa từ chuyên môn rõ ràng thì ưu tiên chuyên môn, không coi là xã giao
+    q_low = question.strip().lower()
+    q_norm = _normalize_for_match(question)
     for hint in _SOCIAL_PROFESSIONAL_HINTS:
-        if hint in q_low:
+        if hint.lower() in q_low or _normalize_for_match(hint) in q_norm:
             return False
-    # Nếu câu cần viết lại do chứa đại từ mơ hồ + có lịch sử => likely là follow-up RAG, không phải xã giao
-    # Kiểm tra đại từ tham chiếu
     if history and _needs_rewrite(question, history):
-        # chứa "nó", "cái đó", "trong đó" v.v. và lịch sử tồn tại => không phải xã giao
         return False
-    # Kiểm tra allowlist -> chắc chắn là xã giao
+    # Bước 2: allowlist nhanh - không cần LLM
     for kw in SOCIAL_ALLOWLIST:
-        if kw.lower() in q_low:
+        if kw.lower() in q_low or _normalize_for_match(kw) in q_norm:
             return True
-    # Các câu rất ngắn: chỉ coi là xã giao nếu khớp mẫu chào hỏi cụ thể, không phải bất kỳ câu ngắn nào
-    # Đã thắt chặt: yêu cầu phải chứa từ khóa xã giao, không tự động cho mọi câu ngắn
-    if len(q_low.split()) <= 4 and len(q_low) < 30:
-        # Chỉ coi là xã giao nếu chứa từ chào hỏi/cảm ơn/tạm biệt trong allowlist hoặc là câu chào ngắn
-        # Đã kiểm tra allowlist ở trên, nếu không khớp thì không phải xã giao
-        # Loại bỏ logic broad "mọi câu ngắn đều là xã giao" gây nhầm với "nó là gì?" hoặc "đồ súc vật"
+    # Bước 3: chỉ câu mơ hồ mới hỏi LLM (tránh delay cho câu đã rõ)
+    # Ví dụ: "haha kể gì vui đi" không có trong allowlist nhưng LLM sẽ hiểu là xã giao
+    # Nếu câu quá ngắn (<3 từ) và không khớp allowlist thì không phải xã giao (tránh "nó là gì?")
+    if len(q_low.split()) <= 2 and len(q_low) < 15:
         return False
+    llm_result = _is_social_llm(question)
+    if llm_result is not None:
+        return llm_result
+    # Bước 4: LLM timeout/lỗi -> mặc định không phải xã giao (đi RAG, an toàn)
     return False
 
 # ── Toán học (proxy sang calculator để giữ API thống nhất) ──
