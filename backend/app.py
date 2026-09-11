@@ -957,11 +957,13 @@ async def chat(req: ChatRequest, request: Request):
                 status_code=503,
                 detail=str(e),
             )
-        # Ollama / connection errors (bao gom 500 Server Error tu Ollama)
-        if any(k in msg for k in ["ollama", "connection", "http://localhost:11434", "500 server error", "connection refused", "failed to connect", "not found"]):
+        # Ollama / connection / timeout errors (bao gom 500 Server Error tu Ollama)
+        if any(k in msg for k in ["ollama", "connection", "http://localhost:11434", "localhost", "500 server error", "connection refused", "failed to connect", "not found", "timed out", "timeout", "read timed out"]):
+            # Giữ nguyên message gốc nếu đã là RuntimeError chi tiết từ generator (chứa gợi ý fix)
+            detail = str(e) if "ollama" in msg and ("timeout" in msg or "gợi ý" in msg.lower()) else "Khong ket noi duoc Ollama (http://localhost:11434) hoac model loi/timeout. Kiem tra: ollama serve & ollama list & ollama pull. Nếu DEVICE=cpu + qwen2.5:7b thì cần tăng timeout hoặc đổi sang qwen2.5:1.5b. Chi tiet: " + str(e)
             raise HTTPException(
                 status_code=503,
-                detail="Khong ket noi duoc Ollama (http://localhost:11434) hoac model loi. Kiem tra: ollama serve & ollama list & ollama pull. Chi tiet: " + str(e),
+                detail=detail,
             )
         raise HTTPException(status_code=500, detail=str(e))
 

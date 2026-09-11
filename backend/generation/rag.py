@@ -18,6 +18,12 @@ from backend.config import (
 )
 from backend.generation.generator import generate, generate_with_history, generate_social, is_social_question, is_history_recall_question, rewrite_query, summarize_history, detect_style_change, strip_style_instruction
 from backend.indexing.retriever import retrieve
+try:
+    from backend.indexing.hybrid import hybrid_retrieve
+    from backend.indexing.bm25 import bm25_search
+except Exception:
+    hybrid_retrieve = None
+    bm25_search = None
 # Security: output validation defense in depth
 try:
     from backend.security import validate_output, validate_sources, validate_tool_call
@@ -38,6 +44,27 @@ except Exception:
     compare_real_numbers = lambda *a, **kw: {"success": False, "error": "comparator not loaded"}
     is_multi_math_question = lambda *a, **kw: False
     calculate_multi = lambda *a, **kw: {"success": False, "error": "multi calculator not loaded"}
+
+
+def _use_hybrid() -> bool:
+    try:
+        import backend.config as _cfg
+        retr = getattr(_cfg, "RETRIEVAL", {})
+        if isinstance(retr, dict):
+            return bool(retr.get("hybrid", True))
+        return True
+    except Exception:
+        return True
+
+def _do_retrieve(query: str, category, top_k: int):
+    """Unified retrieve: hybrid nếu config bật, fallback vector."""
+    if _use_hybrid() and hybrid_retrieve is not None:
+        try:
+            return hybrid_retrieve(query, top_k=top_k, category=category)
+        except Exception as e:
+            print(f"[rag] hybrid fail, fallback vector: {e}")
+    # Fallback vector
+    return retrieve(query, category=category, top_k=top_k, dedup=True)
 
 
 def _prepare_history(
@@ -274,7 +301,13 @@ def answer(
     query_for_retrieval = effective_question
     # Validate tool call: AI chỉ đề xuất, backend kiểm tra
     validate_tool_call("retrieve", {"category": category, "top_k": fetch_k})
-    context = retrieve(query_for_retrieval, category=category, top_k=fetch_k)
+    context = _do_retrieve(query_for_retrieval, category=category, top_k=fetch_k)
+    # Fallback dedup nếu retriever chưa dedup
+    try:
+        from backend.utils.dedup import deduplicate_docs
+        context = deduplicate_docs(context, threshold=0.92)
+    except Exception:
+        pass
 
     if use_rerank and rerank and context:
         validate_tool_call("rerank", {"top_k": top_k})
@@ -521,7 +554,12 @@ def answer_with_history(
     validate_tool_call("retrieve", {"category": category, "top_k": fetch_k})
 
     query_for_retrieval = standalone_q if standalone_q and standalone_q.strip() else effective_question
-    context = retrieve(query_for_retrieval, category=category, top_k=fetch_k)
+    context = _do_retrieve(query_for_retrieval, category=category, top_k=fetch_k)
+    try:
+        from backend.utils.dedup import deduplicate_docs
+        context = deduplicate_docs(context, threshold=0.92)
+    except Exception:
+        pass
 
     if use_rerank and rerank and context:
         validate_tool_call("rerank", {"top_k": top_k})

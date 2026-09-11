@@ -105,12 +105,14 @@ def get_stats() -> dict:
         sample = col.get(limit=min(c, 5), include=["metadatas", "embeddings"])
         metas = sample.get("metadatas", [])
         embeds = sample.get("embeddings", [])
-        # Thong ke theo category / chunk_mode
+        # Thong ke theo category / chunk_mode / chunk_type
         from collections import Counter
         cat_cnt = Counter(m.get("category", "unknown") for m in metas if m)
         mode_cnt = Counter(m.get("chunk_mode", "unknown") for m in metas if m)
+        type_cnt = Counter(m.get("chunk_type", "text") for m in metas if m)
         out["category_count"] = dict(cat_cnt)
         out["chunk_mode_count"] = dict(mode_cnt)
+        out["chunk_type_count"] = dict(type_cnt)
         if embeds is not None and len(embeds) > 0 and embeds[0] is not None:
             out["embedding_dim"] = len(embeds[0])
             # preview 3 gia tri dau

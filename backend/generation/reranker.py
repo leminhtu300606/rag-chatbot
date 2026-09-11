@@ -79,4 +79,19 @@ def rerank(query: str, documents: list[dict], top_k: Optional[int] = None) -> li
 
     reranked.sort(key=lambda x: x["score"], reverse=True)
 
+    # Dedup sau rerank để loại trùng trước khi cắt top_k (tránh 20 bullet trùng như học bổng)
+    try:
+        from backend.utils.dedup import deduplicate_docs
+        deduped = deduplicate_docs(
+            reranked,
+            threshold=cfg.CHUNK.get("dedup_threshold", 0.92) if hasattr(cfg, "CHUNK") else 0.92,
+            exact_only=False,
+        )
+        # Nếu dedup làm giảm dưới top_k, giữ nguyên deduped (không bù thêm trùng)
+        if len(deduped) < top_k:
+            return deduped
+        return deduped[:top_k]
+    except Exception:
+        pass
+
     return reranked[:top_k]

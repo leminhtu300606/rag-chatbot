@@ -78,7 +78,15 @@ def _call_ollama(messages: list[dict], model: str, max_tokens: int, think: bool 
     }
     try:
         sess = _get_ollama_session()
-        resp = sess.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=120)
+        # CPU (qwen2.5:7b) rất chậm, cần timeout dài hơn 120s
+        resp = sess.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=300)
+    except requests.exceptions.Timeout as e:
+        raise RuntimeError(
+            f"Ollama timeout sau 300s khi gọi model '{model}' tại {OLLAMA_BASE}. "
+            f"Model qwen2.5:7b (~4.7GB) quá nặng cho CPU (DEVICE={DEVICE}, RAM free thấp) hoặc ngữ cảnh dài (học bổng). "
+            f"Gợi ý: 1) Chạy 'ollama pull qwen2.5:1.5b' và đổi LLM_MODEL='qwen2.5:1.5b' trong backend/config.py, "
+            f"2) Giảm GEN_MAX_TOKENS xuống 256-384, 3) Giải phóng RAM hoặc bật GPU. Chi tiết: {e}"
+        ) from e
     except requests.exceptions.ConnectionError as e:
         raise RuntimeError(
             f"Không kết nối được Ollama tại {OLLAMA_BASE}. Hãy chạy 'ollama serve' và kiểm tra 'ollama list'. Chi tiết: {e}"
@@ -123,7 +131,7 @@ def _call_ollama_stream(messages: list[dict], model: str, max_tokens: int, think
     }
     try:
         sess = _get_ollama_session()
-        resp = sess.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=120, stream=True)
+        resp = sess.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=300, stream=True)
         resp.raise_for_status()
         for line in resp.iter_lines():
             if not line:
@@ -138,6 +146,8 @@ def _call_ollama_stream(messages: list[dict], model: str, max_tokens: int, think
                     break
             except Exception:
                 continue
+    except requests.exceptions.Timeout as e:
+        raise RuntimeError(f"Ollama stream timeout sau 300s cho model '{model}' tại {OLLAMA_BASE}. Model quá nặng cho CPU, hãy dùng model nhỏ hơn (qwen2.5:1.5b). Chi tiết: {e}") from e
     except requests.exceptions.ConnectionError as e:
         raise RuntimeError(f"Không kết nối được Ollama tại {OLLAMA_BASE}. Chi tiết: {e}") from e
 

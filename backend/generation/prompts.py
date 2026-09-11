@@ -111,6 +111,13 @@ def build_messages(context: list[dict], question: str, style: str | None = None)
     except Exception:
         q_safe = question[:2000]
         def wrap_untrusted_data(x): return f"<<<UNTRUSTED_DATA>>>\n{x}\n<<<END_UNTRUSTED_DATA>>>"
+    # Dedup context cuối cùng trước khi dựng prompt (đề phòng sót)
+    if context:
+        try:
+            from backend.utils.dedup import deduplicate_docs
+            context = deduplicate_docs(context, threshold=0.92, exact_only=False)
+        except Exception:
+            pass
     if context:
         parts = []
         for i, c in enumerate(context):
@@ -177,6 +184,13 @@ def build_messages_with_history(
                 messages.append({"role": role, "content": content.strip()})
 
     # Ngữ cảnh retrieve + câu hỏi hiện tại - bọc như untrusted data
+    # Dedup context
+    if context:
+        try:
+            from backend.utils.dedup import deduplicate_docs
+            context = deduplicate_docs(context, threshold=0.92, exact_only=False)
+        except Exception:
+            pass
     if context:
         parts = []
         for i, c in enumerate(context):

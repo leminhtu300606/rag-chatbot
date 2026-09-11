@@ -61,6 +61,19 @@ def _get_model() -> SentenceTransformer:
                     pass
         except Exception:
             pass
+        # CPU optimization: giới hạn max_seq_length xuống 512 cho BGE-M3 (8192 quá dài, chậm trên CPU)
+        # Chunk của ta max 1200 chars ~ 300 tokens, 512 là đủ và nhanh hơn 16x
+        try:
+            if DEVICE == "cpu" and _model.max_seq_length is not None and _model.max_seq_length > 512:
+                _model.max_seq_length = 512
+                try:
+                    if _model.tokenizer.model_max_length > 512:
+                        _model.tokenizer.model_max_length = 512
+                except Exception:
+                    pass
+                print(f"[embedder] CPU mode: giới hạn max_seq_length -> 512 để tăng tốc (gốc {_model.max_seq_length})")
+        except Exception:
+            pass
     return _model
 
 
