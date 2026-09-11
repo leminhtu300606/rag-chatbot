@@ -140,6 +140,19 @@ def build(rebuild: bool = False) -> None:
 
     items = []
     for c, e in zip(to_embed, embeddings):
+        # Hỗ trợ metadata multimodal mới (chunk_type, has_table, bbox...)
+        meta_extra = {}
+        for k in ["chunk_type", "block_type", "has_table", "has_image", "parent_context", "bbox", "table_data", "image_info"]:
+            if k in c and c[k] is not None:
+                v = c[k]
+                # Nếu là dict/list thì json dump để Chroma metadata chỉ nhận str/int/float/bool
+                if isinstance(v, (dict, list)):
+                    import json as _json
+                    try:
+                        v = _json.dumps(v, ensure_ascii=False)[:3000]
+                    except Exception:
+                        v = str(v)[:1000]
+                meta_extra[k] = v
         items.append(
             {
                 "id": c["id"],
@@ -156,6 +169,7 @@ def build(rebuild: bool = False) -> None:
                     "text_length": len(c["text"]),
                     "embedding_model": cfg.EMBED_MODEL,
                     "embedding_dim": int(emb_dim),
+                    **meta_extra,
                 },
             }
         )

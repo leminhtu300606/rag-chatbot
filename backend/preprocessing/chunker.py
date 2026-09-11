@@ -17,6 +17,34 @@ import numpy as np
 import backend.config as cfg
 CHUNK = cfg.CHUNK
 
+# Ngưỡng sàn an toàn - đoạn ngắn hơn sẽ cho véc-tơ nhiễu, không có giá trị truy hồi
+_MIN_FLOOR = 20
+_MAX_OVERLAP_EXTRA = 300
+
+
+def _effective_min_chars(requested: int | None) -> int:
+    """Tính ngưỡng hiệu dụng = max(ngưỡng cấu hình, ngưỡng sàn 20), kẹp không vượt max_chars."""
+    try:
+        raw = int(requested) if requested is not None else int(cfg.CHUNK.get("min_chars", _MIN_FLOOR))
+    except Exception:
+        raw = _MIN_FLOOR
+    eff = max(raw, _MIN_FLOOR)
+    # Không để ngưỡng hiệu dụng vượt quá max_chars (tránh lọc sạch mọi đoạn khi cấu hình sai)
+    try:
+        max_c = int(cfg.CHUNK.get("max_chars", 1200))
+        if eff > max_c:
+            eff = max(_MIN_FLOOR, max_c)
+    except Exception:
+        pass
+    return eff
+
+
+def _effective_max_chars(requested: int | None) -> int:
+    try:
+        return int(requested) if requested is not None else int(cfg.CHUNK.get("max_chars", 1200))
+    except Exception:
+        return int(cfg.CHUNK.get("max_chars", 1200))
+
 # Regex nhận diện tiêu đề văn bản Việt Nam (quy chế, quy định, quyết định)
 SECTION_RE = re.compile(
     r"^\s*(Chương\s+[IVXLCDM\d]+|Phần\s+[IVXLCDM\d]+|Mục\s+\d+|Điều\s+\d+[\.\:]?|Khoản\s+\d+[\.\:]?|"
@@ -42,6 +70,126 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
 
 
+def fast_chunk(
+    text: str,
+    min_chars: int | None = None,
+    max_chars: int | None = None,
+) -> list[str]:
+    """
+    Chunk nhanh không dùng embedding - chỉ tách câu và gộp theo max_chars.
+    CPU-friendly, dùng cho file lớn để tránh chậm.
+    """
+    if min_chars is None:
+        min_chars = cfg.CHUNK["min_chars"]
+    if max_chars is None:
+        max_chars = cfg.CHUNK["max_chars"]
+    effective_min = _effective_min_chars(min_chars)
+    effective_max = _effective_max_chars(max_chars)
+    sentences = split_sentences(text)
+    if not sentences:
+        return []
+    if len(sentences) == 1:
+        s = sentences[0].strip()
+        if len(s) >= _MIN_FLOOR:
+            return [s[:effective_max]]
+        return []
+    # Gộp câu liên tiếp đến khi đạt max_chars
+    chunks: list[str] = []
+    buf = ""
+    for s in sentences:
+        if not buf:
+            buf = s
+        elif len(buf) + len(s) + 1 <= effective_max:
+            buf = f"{buf} {s}"
+        else:
+            chunks.append(buf)
+            buf = s
+    if buf:
+        chunks.append(buf)
+    # Gộp vụn ngắn
+    if len(chunks) > 1:
+        coalesced: list[str] = []
+        cur = ""
+        for c in chunks:
+            if not cur:
+                cur = c
+            elif len(cur) < effective_min and len(cur) + len(c) + 1 <= effective_max:
+                cur = f"{cur} {c}"
+            elif len(c) < effective_min and len(cur) + len(c) + 1 <= effective_max:
+                cur = f"{cur} {c}"
+            else:
+                coalesced.append(cur)
+                cur = c
+        if cur:
+            coalesced.append(cur)
+        if len(coalesced) > 1 and len(coalesced[-1]) < effective_min:
+            if len(coalesced[-2]) + len(coalesced[-1]) + 1 <= effective_max:
+                coalesced[-2] = f"{coalesced[-2]} {coalesced[-1]}"
+                coalesced.pop()
+        chunks = coalesced
+    # Lọc và xử lý quá dài
+    final: list[str] = []
+    for c in chunks:
+        if len(c) <= effective_max:
+            final.append(c)
+        else:
+            # Cắt theo câu
+            cur = ""
+            for s in split_sentences(c):
+                if len(cur) + len(s) + 1 <= effective_max:
+                    cur = (cur + " " + s).strip() if cur else s
+                else:
+                    if cur:
+                        final.append(cur)
+                    cur = s
+            if cur:
+                final.append(cur)
+    filtered = [c for c in final if len(c) >= effective_min]
+    if not filtered:
+        fallback = [c for c in final if len(c) >= _MIN_FLOOR]
+        if fallback:
+            try:
+                from backend.utils.dedup import deduplicate_chunks
+                fallback = deduplicate_chunks(fallback, threshold=cfg.CHUNK.get("dedup_threshold", 0.92), exact_only=cfg.CHUNK.get("dedup_exact_only", False))
+            except Exception:
+                pass
+            return fallback
+        stripped = text.strip()
+        if len(stripped) >= _MIN_FLOOR:
+            return [stripped[:effective_max]]
+    try:
+        from backend.utils.dedup import deduplicate_chunks
+        filtered = deduplicate_chunks(filtered, threshold=cfg.CHUNK.get("dedup_threshold", 0.92), exact_only=cfg.CHUNK.get("dedup_exact_only", False))
+    except Exception:
+        pass
+    return filtered
+
+
+def _should_use_semantic(text: str) -> bool:
+    """Quyết định có dùng semantic (embedding) hay fast cho CPU."""
+    # Nếu tắt semantic toàn cục thì dùng fast
+    if not cfg.CHUNK.get("use_semantic", True):
+        return False
+    # CPU-friendly: mặc định dùng fast trên CPU để rebuild nhanh, chỉ dùng semantic khi có GPU
+    try:
+        if cfg.DEVICE == "cpu" and not cfg.CHUNK.get("force_semantic_on_cpu", False):
+            return False
+    except Exception:
+        pass
+    # Nếu text quá dài hoặc quá nhiều câu thì dùng fast để tiết kiệm CPU
+    max_chars = cfg.CHUNK.get("semantic_max_chars", 3000)
+    max_sents = cfg.CHUNK.get("semantic_max_sents", 30)
+    if len(text) > max_chars:
+        return False
+    try:
+        sents = split_sentences(text)
+        if len(sents) > max_sents:
+            return False
+    except Exception:
+        pass
+    return True
+
+
 def semantic_chunk(
     text: str,
     embed_fn,
@@ -56,11 +204,21 @@ def semantic_chunk(
     if threshold is None:
         threshold = cfg.CHUNK["break_threshold"]
     """Chia chunk cơ bản theo ngữ nghĩa (tính tương tự cosine giữa các câu liền kề)."""
+    # Fast path cho CPU khi text dài để tiết kiệm thời gian
+    if not _should_use_semantic(text):
+        return fast_chunk(text, min_chars=min_chars, max_chars=max_chars)
+    # Ngưỡng hiệu dụng: tôn trọng cấu hình nhưng không bao giờ dưới sàn 20
+    effective_min = _effective_min_chars(min_chars)
+    effective_max = _effective_max_chars(max_chars)
     sentences = split_sentences(text)
     if not sentences:
         return []
     if len(sentences) == 1:
-        return [sentences[0]] if len(sentences[0]) >= 20 else []
+        # Đoạn chỉ một câu: giữ nếu đạt sàn an toàn, kể cả khi chưa đủ ngưỡng mong muốn (tránh mất dữ liệu điều ngắn)
+        if len(sentences[0]) >= _MIN_FLOOR:
+            # Nếu câu ngắn hơn ngưỡng hiệu dụng nhưng là duy nhất, vẫn giữ để không mất điều khoản ngắn có giá trị
+            return [sentences[0]] if len(sentences[0]) >= effective_min else [sentences[0]]
+        return []
 
     embeddings = [np.asarray(v) for v in embed_fn(sentences)]
     sims = [_cosine(embeddings[i], embeddings[i + 1]) for i in range(len(embeddings) - 1)]
@@ -80,7 +238,7 @@ def semantic_chunk(
     merged = []
     buf = ""
     for c in raw_chunks:
-        if not buf or len(buf) + len(c) + 1 <= max_chars:
+        if not buf or len(buf) + len(c) + 1 <= effective_max:
             buf = (buf + " " + c).strip() if buf else c
         else:
             merged.append(buf)
@@ -88,14 +246,38 @@ def semantic_chunk(
     if buf:
         merged.append(buf)
 
+    # Tinh chỉnh: gộp đoạn vụn ngắn hơn ngưỡng hiệu dụng nếu vẫn trong giới hạn tối đa
+    # Giúp tránh đoạn quá ngắn khi ngữ nghĩa tách vụn
+    if len(merged) > 1:
+        coalesced: list[str] = []
+        cur_buf = ""
+        for c in merged:
+            if not cur_buf:
+                cur_buf = c
+            elif len(cur_buf) < effective_min and len(cur_buf) + len(c) + 1 <= effective_max:
+                cur_buf = f"{cur_buf} {c}"
+            elif len(c) < effective_min and len(cur_buf) + len(c) + 1 <= effective_max:
+                cur_buf = f"{cur_buf} {c}"
+            else:
+                coalesced.append(cur_buf)
+                cur_buf = c
+        if cur_buf:
+            coalesced.append(cur_buf)
+        # Nếu đoạn cuối vẫn quá ngắn, gộp ngược vào đoạn trước nếu vừa
+        if len(coalesced) > 1 and len(coalesced[-1]) < effective_min:
+            if len(coalesced[-2]) + len(coalesced[-1]) + 1 <= effective_max:
+                coalesced[-2] = f"{coalesced[-2]} {coalesced[-1]}"
+                coalesced.pop()
+        merged = coalesced
+
     final = []
     for c in merged:
-        if len(c) <= max_chars:
+        if len(c) <= effective_max:
             final.append(c)
         else:
             cur = ""
             for s in split_sentences(c):
-                if len(cur) + len(s) + 1 <= max_chars:
+                if len(cur) + len(s) + 1 <= effective_max:
                     cur = (cur + " " + s).strip() if cur else s
                 else:
                     if cur:
@@ -104,7 +286,29 @@ def semantic_chunk(
             if cur:
                 final.append(cur)
 
-    return [c for c in final if len(c) >= 20]
+    filtered = [c for c in final if len(c) >= effective_min]
+    # Bảo toàn dữ liệu: nếu mọi đoạn đều ngắn hơn ngưỡng mong muốn nhưng vẫn đạt sàn an toàn,
+    # giữ lại các đoạn đạt sàn thay vì trả về rỗng (tránh mất văn bản ngắn hợp lệ)
+    if not filtered:
+        fallback = [c for c in final if len(c) >= _MIN_FLOOR]
+        if fallback:
+            try:
+                from backend.utils.dedup import deduplicate_chunks
+                fallback = deduplicate_chunks(fallback, threshold=cfg.CHUNK.get("dedup_threshold", 0.92), exact_only=cfg.CHUNK.get("dedup_exact_only", False))
+            except Exception:
+                pass
+            return fallback
+        # Trường hợp văn bản gốc ngắn hơn ngưỡng hiệu dụng nhưng vẫn có nghĩa
+        stripped = text.strip()
+        if len(stripped) >= _MIN_FLOOR:
+            return [stripped[:effective_max]]
+    # Dedup cho semantic_chunk cũng cần để tránh lặp
+    try:
+        from backend.utils.dedup import deduplicate_chunks
+        filtered = deduplicate_chunks(filtered, threshold=cfg.CHUNK.get("dedup_threshold", 0.92), exact_only=cfg.CHUNK.get("dedup_exact_only", False))
+    except Exception:
+        pass
+    return filtered
 
 
 # ── Contextual chunking ──
@@ -169,6 +373,7 @@ def _add_overlap(chunks: list[str], overlap_sentences: int = 1) -> list[str]:
     if overlap_sentences <= 0 or len(chunks) <= 1:
         return chunks
     overlapped = []
+    effective_max = _effective_max_chars(None)
     for i, chunk in enumerate(chunks):
         if i == 0:
             overlapped.append(chunk)
@@ -180,7 +385,7 @@ def _add_overlap(chunks: list[str], overlap_sentences: int = 1) -> list[str]:
         if overlap and overlap not in chunk[:300]:
             enriched = f"{overlap} {chunk}"
             # Cắt nếu quá max_chars thì giữ chunk gốc
-            if len(enriched) <= CHUNK["max_chars"] + 300:
+            if len(enriched) <= effective_max + _MAX_OVERLAP_EXTRA:
                 overlapped.append(enriched)
             else:
                 overlapped.append(chunk)
@@ -290,6 +495,9 @@ def contextual_chunk(
     if use_llm_context is None:
         use_llm_context = cfg.CHUNK.get("use_llm_context", False)
 
+    effective_min = _effective_min_chars(min_chars)
+    effective_max = _effective_max_chars(max_chars)
+
     text = text.strip()
     if not text:
         return []
@@ -308,10 +516,11 @@ def contextual_chunk(
             continue
         # Semantic chunk trong từng section (giữ coherence theo heading)
         sec_chunks = semantic_chunk(sec_text, embed_fn, min_chars, max_chars, threshold)
-        # Nếu section ngắn (< min_chars) mà semantic trả về rỗng, giữ nguyên section
-        if not sec_chunks and len(sec_text) >= 20:
-            sec_chunks = [sec_text] if len(sec_text) <= max_chars else [
-                sec_text[i:i+max_chars] for i in range(0, len(sec_text), max_chars)
+        # Nếu section ngắn mà semantic trả về rỗng, giữ nguyên section nếu đạt sàn an toàn
+        # (tránh mất điều khoản ngắn có giá trị khi ngưỡng mong muốn cao)
+        if not sec_chunks and len(sec_text.strip()) >= _MIN_FLOOR:
+            sec_chunks = [sec_text] if len(sec_text) <= effective_max else [
+                sec_text[i:i+effective_max] for i in range(0, len(sec_text), effective_max)
             ]
 
         for chunk in sec_chunks:
@@ -328,8 +537,54 @@ def contextual_chunk(
         if not use_llm_context:
             all_chunks = _add_overlap(all_chunks, overlap_sentences=context_window)
 
-    # Lọc lại
-    return [c for c in all_chunks if len(c.strip()) >= 20]
+    # Tinh chỉnh cho dữ liệu phức tạp: gộp các đoạn vụn ngắn hơn ngưỡng hiệu dụng trước khi lọc
+    # Giúp đoạn ngắn nhưng có giá trị không bị loại khi ngưỡng mong muốn cao
+    if len(all_chunks) > 1:
+        coalesced_all: list[str] = []
+        buf = ""
+        for c in all_chunks:
+            if not buf:
+                buf = c
+            elif len(buf.strip()) < effective_min and len(buf) + len(c) + 1 <= effective_max + _MAX_OVERLAP_EXTRA:
+                # Gộp đoạn ngắn với đoạn kề để đạt ngưỡng, vẫn giữ heading của đoạn đầu
+                buf = f"{buf} {c}"
+            elif len(c.strip()) < effective_min and len(buf) + len(c) + 1 <= effective_max + _MAX_OVERLAP_EXTRA:
+                buf = f"{buf} {c}"
+            else:
+                coalesced_all.append(buf)
+                buf = c
+        if buf:
+            coalesced_all.append(buf)
+        # Gộp đoạn cuối nếu vẫn quá ngắn
+        if len(coalesced_all) > 1 and len(coalesced_all[-1].strip()) < effective_min:
+            if len(coalesced_all[-2]) + len(coalesced_all[-1]) + 1 <= effective_max + _MAX_OVERLAP_EXTRA:
+                coalesced_all[-2] = f"{coalesced_all[-2]} {coalesced_all[-1]}"
+                coalesced_all.pop()
+        all_chunks = coalesced_all
+
+    # Lọc lại theo ngưỡng hiệu dụng (tôn trọng cấu hình + sàn 20)
+    # Lưu ý: sau khi enrich heading, độ dài tăng nên kiểm tra sau enrich mới chính xác
+    filtered = [c for c in all_chunks if len(c.strip()) >= effective_min]
+    if not filtered:
+        # Bảo toàn dữ liệu phức tạp: nếu không có đoạn nào đạt ngưỡng mong muốn nhưng có đoạn đạt sàn, giữ lại
+        fallback = [c for c in all_chunks if len(c.strip()) >= _MIN_FLOOR]
+        if fallback:
+            # Dedup trước khi trả về để tránh lặp 20 bullet học bổng
+            try:
+                from backend.utils.dedup import deduplicate_chunks
+                fallback = deduplicate_chunks(fallback, threshold=cfg.CHUNK.get("dedup_threshold", 0.92), exact_only=cfg.CHUNK.get("dedup_exact_only", False))
+            except Exception:
+                pass
+            return fallback
+        if text.strip() and len(text.strip()) >= _MIN_FLOOR:
+            return [text.strip()[:effective_max]]
+    # Dedup cuối cùng để loại chunk trùng do overlap + heading
+    try:
+        from backend.utils.dedup import deduplicate_chunks
+        filtered = deduplicate_chunks(filtered, threshold=cfg.CHUNK.get("dedup_threshold", 0.92), exact_only=cfg.CHUNK.get("dedup_exact_only", False))
+    except Exception:
+        pass
+    return filtered
 
 
 # Alias để pipeline có thể import linh hoạt

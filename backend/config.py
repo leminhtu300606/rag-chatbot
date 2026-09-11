@@ -21,13 +21,12 @@ PROCESSED_EXT = ".parquet"  # dinh dang du lieu huan luyen: parquet (thay jsonl)
 CHROMA_DIR = BASE_DIR / "chroma_db"
 INDEXED_MANIFEST = PROCESSED_DIR / ".indexed.json"
 
-EMBED_MODEL = "BAAI/bge-m3"
-
 LLM_BACKEND = "ollama"
 # qwen2.5:7b (~4.7GB) can ~8GB RAM/VRAM - can bang tot giua chat luong va tai nguyen
 # Cac tag khac: qwen2.5:0.5b (0.4GB), qwen2.5:1.5b (1GB), qwen2.5:3b (1.9GB), qwen2.5:14b (9GB), qwen2.5:32b (20GB)
 # Vi du: LLM_MODEL = "qwen2.5:1.5b"  hoac "qwen2.5:14b"  hoac "qwen2.5:32b"
-LLM_MODEL = "qwen2.5"
+# Đã đổi sang 1.5b để chạy ổn trên CPU 16GB (fix timeout Read timed out 120s với 7b)
+LLM_MODEL = "qwen2.5:1.5b"
 OLLAMA_BASE = "http://localhost:11434"
 LLM_THINK = False
 
@@ -43,6 +42,45 @@ CHUNK = {
     "context_window": 1,  # số câu chồng lấn giữa các chunk
     "use_llm_context": False,  # True = gọi LLM tạo mô tả ngữ cảnh cho mỗi chunk (Anthropic contextual retrieval)
     "heading_enrich": True,  # True = tiền tố tiêu đề Chương/Điều vào mỗi chunk
+    # ── Dedup ──
+    "dedup_threshold": 0.92,  # ngưỡng fuzzy SequenceMatcher để coi là trùng (0.92)
+    "dedup_exact_only": False,  # False = cả fuzzy, True = chỉ exact hash
+    # ── Multimodal cấu trúc ──
+    "enable_table_struct": True,  # True = chunk bảng dạng structured {headers, rows}
+    "enable_image_save": False,  # True = lưu ảnh crop ra disk (tốn dung lượng)
+    "enable_parent_child": True,  # True = lưu parent context cho table/figure
+    "parent_chars": 600,  # số ký tự parent lấy quanh child
+    # ── CPU-friendly semantic ──
+    "use_semantic": True,  # True = dùng embedding semantic khi text ngắn, False = luôn fast
+    "semantic_max_chars": 3000,  # text dài hơn ngưỡng này thì dùng fast_chunk
+    "semantic_max_sents": 30,  # nhiều câu hơn ngưỡng này thì dùng fast
+}
+
+# ── Layout & Multimodal ──
+LAYOUT = {
+    "use_blocks": True,  # True = dùng page.get_text("blocks") sorted reading order thay vì plain text
+    "detect_columns": True,  # True = tự phát hiện 2 cột nếu có
+    "table_mode": "auto",  # auto | pymupdf | camelot | off
+    "image_mode": "metadata",  # metadata | save | off  (save cần disk)
+    "ocr_detail": 0,  # 0 = paragraph nhanh (CPU-friendly), 1 = có bbox để giữ layout cho scan (chậm hơn)
+}
+
+# ── Retrieval Hybrid ──
+RETRIEVAL = {
+    "hybrid": True,  # True = BM25 + Vector
+    "bm25_k1": 1.5,
+    "bm25_b": 0.75,
+    "vector_weight": 0.7,  # trọng số vector trong hybrid (0.7 vector + 0.3 bm25)
+    "bm25_weight": 0.3,
+}
+
+# ── Vision LLM (conditional, CPU-friendly) ──
+VISION = {
+    "enabled": False,  # False mặc định để chạy CPU nhẹ; bật khi cần hiểu sơ đồ/biểu đồ
+    "model": "qwen2-vl:2b",  # model Ollama vision nhỏ chạy CPU được (2b ~1.6GB)
+    "base": OLLAMA_BASE,
+    "max_tokens": 256,
+    "trigger_keywords": ["hình", "ảnh", "biểu đồ", "sơ đồ", "chart", "figure", "ảnh minh họa", "bảng hình"],
 }
 
 # ── PHẦN 2: Retrieval & Reranking ──
@@ -72,10 +110,29 @@ DEVICE = _detect_device()
 # Có dùng GPU không (để các module khác tự quyết)
 USE_GPU = DEVICE in ("cuda", "cuda:0", "mps")
 # Batch size mặc định cho embedding/rerank (tăng khi có GPU)
-EMBED_BATCH_SIZE = 64 if USE_GPU else 32
+EMBED_BATCH_SIZE = 64 if USE_GPU else 16
 RERANK_BATCH_SIZE = 32 if USE_GPU else 16
 # OCR có dùng GPU không
 OCR_USE_GPU = USE_GPU
+
+# EMBED_MODEL: chọn model phù hợp với phần cứng để cân bằng tốc độ/chất lượng
+# - CPU: dangvantuan/vietnamese-embedding (768 dim, 256 tokens, ~0.02s/doc, nhẹ) -> 7s cho 339 chunks
+# - GPU: BAAI/bge-m3 (1024 dim, 512 tokens, chất lượng cao hơn nhưng nặng) -> 15s/5 docs trên CPU quá chậm
+# Tự động chọn theo DEVICE, cho phép ghi đè qua EMBED_MODEL env
+def _choose_embed_model() -> str:
+    import os
+    env = os.getenv("EMBED_MODEL", "").strip()
+    if env:
+        return env
+    try:
+        if USE_GPU:
+            return "BAAI/bge-m3"
+        else:
+            return "dangvantuan/vietnamese-embedding"
+    except Exception:
+        return "dangvantuan/vietnamese-embedding"
+
+EMBED_MODEL = _choose_embed_model()
 
 # ── Hội thoại: quản lý ngữ cảnh ──
 # Cân bằng: nhớ từ đầu phiên, tốc độ + chính xác, nói thẳng khi không đủ nguồn

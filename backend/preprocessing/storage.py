@@ -50,16 +50,25 @@ def save_chunks(path: Path, chunks: List[Dict]) -> None:
     if ext == ".parquet" and HAS_PARQUET:
         if not chunks:
             # Tao file rong voi schema co san de tranh loi
-            df = pd.DataFrame(columns=["id","text","category","subcategory","filename","source","page","chunk_index","chunk_mode"])
+            df = pd.DataFrame(columns=["id","text","category","subcategory","filename","source","page","chunk_index","chunk_mode","chunk_type","parent_context","bbox","has_table","has_image"])
             df.to_parquet(path, index=False)
             return
         df = pd.DataFrame(chunks)
-        # Dam bao thu tu cot on dinh
-        cols = ["id","text","category","subcategory","filename","source","page","chunk_index","chunk_mode"]
-        for c in cols:
+        # Dam bao thu tu cot on dinh - giữ thêm các cột mới nếu có
+        base_cols = ["id","text","category","subcategory","filename","source","page","chunk_index","chunk_mode"]
+        extra_cols = ["chunk_type","parent_context","bbox","has_table","has_image","block_type","table_data","image_info"]
+        # Đảm bảo base cols
+        for c in base_cols:
             if c not in df.columns:
                 df[c] = None
-        df = df[cols]
+        # Giữ extra cols nếu tồn tại, không bắt buộc
+        keep_cols = base_cols + [c for c in extra_cols if c in df.columns]
+        # Nhưng đảm bảo thứ tự: base trước, extra sau
+        df = df[keep_cols]
+        # Chuyển dict/list trong extra thành JSON string để parquet lưu được (bbox, table_data)
+        for col in ["bbox","table_data","image_info"]:
+            if col in df.columns:
+                df[col] = df[col].apply(lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, (dict, list)) else x)
         df.to_parquet(path, index=False)
         # Xoa file jsonl cu neu co (migrate)
         try:

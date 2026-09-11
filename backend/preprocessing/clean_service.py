@@ -26,7 +26,7 @@ from collections import Counter
 import backend.config as cfg
 from backend.preprocessing.loader import load_file
 from backend.preprocessing.cleaner import clean_text
-from backend.preprocessing.chunker import contextual_chunk, semantic_chunk
+from backend.preprocessing.chunker import contextual_chunk, semantic_chunk, _effective_min_chars
 # Import embed sau khi da tat warning
 from backend.indexing.embedder import embed
 
@@ -91,7 +91,9 @@ def clean_single_file(path: Path, dry_run: bool = False, show_sample: bool = Fal
             pieces = chunk_fn(cleaned, embed)
 
         for i, piece in enumerate(pieces):
-            if len(piece) < 50:
+            # Đồng bộ với ngưỡng hiệu dụng của chunker (max(min_chars, 20), kẹp theo max_chars)
+            _eff_min = _effective_min_chars(None)
+            if len(piece.strip()) < _eff_min:
                 continue
             cleaned_chunks.append({
                 "id": f"{filename}-{rec.get('page',0)}-{i}",
