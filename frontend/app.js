@@ -664,6 +664,171 @@ $("#stats-btn")?.addEventListener("click", async()=>{
   try{ const j=await fetch("/api/stats").then(r=>r.json()); pre.textContent=JSON.stringify(j,null,2);}catch(e){pre.textContent=String(e);}
 });
 
+// ── Upload theo phiên (chỉ lưu tại phiên, streaming hỗ trợ file lớn) ──
+const uploadsBar = $("#uploads-bar");
+const uploadsListEl = $("#uploads-list");
+const uploadsCountEl = $("#uploads-count");
+const attachBtn = $("#attach-btn");
+const fileInput = $("#file-input");
+const uploadsClearBtn = $("#uploads-clear");
+
+async function fetchUploadsForActive(){
+  if(!activeSessionId || !uploadsBar) return;
+  try{
+    const r = await fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}/uploads`);
+    if(!r.ok) throw new Error("list fail");
+    const j = await r.json();
+    renderUploadsBar(j.files || [], j.disk_files || []);
+  }catch(e){
+    // không hiện lỗi, chỉ ẩn bar nếu chưa có gì
+    if(uploadsListEl && !uploadsListEl.children.length) uploadsBar?.classList.add("hidden");
+  }
+}
+function renderUploadsBar(files, diskFiles){
+  if(!uploadsBar || !uploadsListEl) return;
+  const hasFiles = (files && files.length) || (diskFiles && diskFiles.length);
+  if(!hasFiles){
+    uploadsBar.classList.add("hidden");
+    if(uploadsCountEl) uploadsCountEl.textContent = "";
+    uploadsListEl.innerHTML = "";
+    return;
+  }
+  uploadsBar.classList.remove("hidden");
+  const totalChunks = files.reduce((a,b)=>a+(b.chunks||0),0);
+  if(uploadsCountEl) uploadsCountEl.textContent = `• ${files.length} file • ${totalChunks} đoạn`;
+  // Map disk sizes
+  const sizeMap = {};
+  (diskFiles||[]).forEach(d=>{ sizeMap[d.filename]=d.size; });
+  uploadsListEl.innerHTML = files.map(f=>{
+    const sz = sizeMap[f.filename];
+    const szStr = sz ? `• ${(sz/1024).toFixed(1)} KB` : "";
+    return `<div class="upload-item" data-fn="${escapeHtml(f.filename)}"><i class="fa-regular fa-file"></i><span class="fname" title="${escapeHtml(f.filename)}">${escapeHtml(f.filename)}</span><span class="meta">${f.chunks} đoạn ${szStr}</span><button class="del" title="Xóa file" data-del="${escapeHtml(f.filename)}"><i class="fa-solid fa-xmark"></i></button></div>`;
+  }).join("");
+  uploadsListEl.querySelectorAll("[data-del]").forEach(btn=>{
+    btn.addEventListener("click", async (e)=>{
+      e.stopPropagation();
+      const fn = btn.getAttribute("data-del");
+      if(!fn) return;
+      if(!confirm(`Xóa file "${fn}" khỏi phiên này?`)) return;
+      try{
+        await fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}/uploads/${encodeURIComponent(fn)}`, {method:"DELETE"});
+        // remove from local conversation hint? không cần
+        fetchUploadsForActive();
+      }catch(err){ alert("Xóa lỗi: "+err); }
+    });
+  });
+}
+uploadsClearBtn?.addEventListener("click", async ()=>{
+  if(!activeSessionId) return;
+  if(!confirm("Xóa tất cả file trong phiên này?")) return;
+  try{
+    const r = await fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}/uploads`);
+    const j = await r.json();
+    const files = j.files || [];
+    for(const f of files){
+      await fetch(`/api/sessions/${encodeURIComponent(activeSessionId)}/uploads/${encodeURIComponent(f.filename)}`, {method:"DELETE"});
+    }
+    fetchUploadsForActive();
+  }catch(e){ alert(String(e)); }
+});
+
+async function uploadFile(file){
+  if(!file) return;
+  const allowed = [".pdf",".docx",".txt",".md",".csv"];
+  const ext = "."+ (file.name.split(".").pop()||"").toLowerCase();
+  if(!allowed.includes(ext)){
+    alert(`Định dạng ${ext} không hỗ trợ. Chỉ: ${allowed.join(", ")}`);
+    return;
+  }
+  // Kiểm tra dung lượng tối đa (100MB) - cảnh báo sớm
+  const maxBytes = 100*1024*1024;
+  if(file.size > maxBytes){
+    alert(`File ${file.name} vượt quá 100MB (${(file.size/1024/1024).toFixed(1)}MB). Hệ thống hỗ trợ tối đa 100MB, hãy chia nhỏ file.`);
+    return;
+  }
+  if(!activeSessionId){
+    await createNewSession(true);
+  }
+  const sid = activeSessionId;
+  // Hiển thị trạng thái
+  setStatus(`Đang tải ${file.name} (${(file.size/1024).toFixed(1)} KB)...`);
+  if(attachBtn) attachBtn.disabled = true;
+  if(sendBtn) sendBtn.disabled = true;
+  // Thêm bubble chờ
+  const userRow = addMsg("user", `📎 Đã gửi file: ${file.name} (${(file.size/1024).toFixed(1)} KB)`);
+  const placeholder = addMsg("assistant", "⏳ Đang phân tích file...");
+  const bubble = placeholder.querySelector(".bubble");
+  try{
+    const fd = new FormData();
+    fd.append("file", file, file.name);
+    const r = await fetch(`/api/sessions/${encodeURIComponent(sid)}/upload`, {method:"POST", body: fd});
+    const j = await r.json().catch(()=>({detail: "Lỗi parse"}));
+    if(!r.ok) throw new Error(j.detail || `HTTP ${r.status}`);
+    // Cập nhật uploads bar
+    fetchUploadsForActive();
+    // Hiển thị auto_message
+    const autoMsg = j.auto_message || "Đã xử lý file.";
+    const isAuto = j.is_auto_answered;
+    const meta = isAuto ? `<span class="tool">✅ tự động trả lời từ file</span>` : `<span class="tool">❓ cần thêm yêu cầu</span>`;
+    bubble.innerHTML = `<span class="answer-text"></span><div class="meta">${meta}<span class="tool">${escapeHtml(j.filename)} • ${j.chunks} đoạn • ${j.pages} trang</span></div>`;
+    const answerEl = bubble.querySelector(".answer-text");
+    await typeWriterEffect(answerEl, autoMsg, TYPEWRITER_SPEED);
+    // Lưu vào conversation local để nhớ
+    conversation.push({role:"user", content:`[Đã tải file: ${j.filename}]`});
+    conversation.push({role:"assistant", content:autoMsg});
+    if(activeSessionId && sessionsMap[activeSessionId]){
+      sessionsMap[activeSessionId].conversation = conversation.slice(-60);
+      sessionsMap[activeSessionId].updatedAt = Date.now();
+      saveSessionsMap(sessionsMap);
+      renderSessionListLocal();
+      updateHistoryBadge();
+    }
+    setStatus("");
+    // Hiển thị nguồn nếu có
+    if(j.sources && j.sources.length){
+      sourcesEl.innerHTML = j.sources.map(s=>`<div class="source"><b>${escapeHtml(s.filename||"")}</b> trang ${s.page} • uploaded<br><span class="hint">${escapeHtml(s.filename||"")}</span></div>`).join("");
+      const rp=$("#right-panel"); if(rp) rp.style.display="flex";
+    }
+  }catch(e){
+    bubble.innerHTML = `❌ <b>Lỗi tải file:</b> ${escapeHtml(String(e.message||e))}<div class="meta">Thử lại hoặc chia nhỏ file</div>`;
+    setStatus("Lỗi tải file");
+  }finally{
+    if(attachBtn) attachBtn.disabled = false;
+    if(sendBtn) sendBtn.disabled = false;
+    // reset file input để chọn lại cùng file được
+    if(fileInput) fileInput.value = "";
+    isLoading=false;
+  }
+}
+
+// Gắn sự kiện – chỉ dùng nút đính kèm, đã xóa kéo thả màu xanh
+attachBtn?.addEventListener("click", ()=>{
+  if(fileInput) fileInput.click();
+});
+fileInput?.addEventListener("change", ()=>{
+  const f = fileInput.files && fileInput.files[0];
+  if(f) uploadFile(f);
+});
+// Chặn hành vi mặc định của trình duyệt khi kéo file ra ngoài (không hiện overlay xanh)
+document.addEventListener("dragover", (e)=> e.preventDefault());
+document.addEventListener("drop", (e)=> e.preventDefault());
+// Khi đổi phiên, fetch uploads
+const _origLoadSession = loadSession;
+loadSession = async function(id){
+  const r = await _origLoadSession(id);
+  fetchUploadsForActive();
+  return r;
+};
+const _origCreateNewSession = createNewSession;
+createNewSession = async function(pushUrl=true){
+  const r = await _origCreateNewSession(pushUrl);
+  fetchUploadsForActive();
+  return r;
+};
+// Fetch ngay sau khi init xong (delay để session sẵn sàng)
+setTimeout(fetchUploadsForActive, 1200);
+setInterval(()=>{ if(document.visibilityState==="visible" && activeSessionId) fetchUploadsForActive(); }, 15000);
+
 async function send(){
   if(isLoading) return;
   let q=input.value.trim(); if(!q) return;

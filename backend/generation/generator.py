@@ -679,6 +679,128 @@ def is_social_question(question: str, history: list[dict] | None = None) -> bool
     # Bước 4: LLM timeout/lỗi -> mặc định không phải xã giao (đi RAG, an toàn)
     return False
 
+# ── Upload theo phiên: tự động phát hiện yêu cầu và trả lời ──
+def detect_file_intent(file_text: str) -> dict:
+    """Phát hiện file có yêu cầu rõ ràng cần tự trả lời hay không.
+
+    Returns: {"has_request": bool, "extracted_query": str, "reason": str}
+    Luồng: heuristic nhanh -> LLM classify nếu mơ hồ.
+    """
+    import re
+    import json as _json
+    txt = (file_text or "").strip()
+    if not txt:
+        return {"has_request": False, "extracted_query": "", "reason": "file rỗng"}
+    low = txt.lower()
+    # helper bỏ dấu để so khớp không dấu
+    def _strip_acc(t: str) -> str:
+        import unicodedata as _ud
+        try:
+            return "".join(c for c in _ud.normalize("NFD", t) if _ud.category(c) != "Mn")
+        except Exception:
+            return t
+    low_no_acc = _strip_acc(low)
+    # Heuristic nhanh
+    question_marks = txt.count("?")
+    # Từ khóa mệnh lệnh / câu hỏi (cả có dấu và không dấu)
+    imperative_keywords = [
+        "hãy", "vui lòng", "yêu cầu", "đề bài", "bài tập", "câu hỏi",
+        "trả lời", "giải thích", "tóm tắt", "phân tích", "liệt kê",
+        "làm gì", "là gì", "tại sao", "thế nào", "bao nhiêu", "khi nào",
+        "hãy cho biết", "cho biết", "nêu", "trình bày",
+        "exercise", "question", "answer", "please", "summarize"
+    ]
+    # thêm bản không dấu để bắt cả gõ không dấu
+    imperative_no_acc = [_strip_acc(k) for k in imperative_keywords]
+    has_keyword = any(kw in low for kw in imperative_keywords) or any(kw in low_no_acc for kw in imperative_no_acc)
+    # Mệnh lệnh mạnh không cần dấu ? : hãy, vui lòng, tóm tắt, phân tích...
+    strong_imperative = ["hãy", "vui lòng", "vui long", "hay tom tat", "hãy tóm tắt", "tom tat", "tóm tắt", "phan tich", "phân tích", "tra loi", "trả lời", "giai thich", "giải thích", "hay cho biet", "hãy cho biết"]
+    has_strong = any(kw in low or kw in low_no_acc for kw in strong_imperative)
+    # Nếu có nhiều dấu ? -> chắc chắn là có yêu cầu (đề thi, danh sách câu hỏi)
+    if question_marks >= 2:
+        sentences = re.split(r"[?。\n]", txt)
+        qs = [s.strip() + "?" for s in sentences if "?" in s or len(s.strip()) > 20 and "?" in txt]
+        extracted = txt[txt.find("?")-200:txt.find("?")+200].strip() if "?" in txt else ""
+        if not extracted:
+            extracted = "\n".join([s for s in sentences if s.strip()][:3])[:1000]
+        return {"has_request": True, "extracted_query": extracted[:2000] if extracted else txt[:1000], "reason": f"heuristic: {question_marks} dấu ? + keyword"}
+    # Nếu có từ khóa mạnh dù không có ? cũng coi là có yêu cầu (VD: Vui lòng tóm tắt...)
+    if has_strong:
+        for kw in imperative_keywords + imperative_no_acc:
+            if kw in low or kw in low_no_acc:
+                # tìm vị trí
+                idx = low.find(kw) if kw in low else low_no_acc.find(kw)
+                # fallback dùng low
+                if idx == -1:
+                    idx = 0
+                # trích đoạn quanh keyword
+                start = max(0, idx-200)
+                extracted = txt[start: start+800].strip()
+                if extracted:
+                    return {"has_request": True, "extracted_query": extracted[:2000], "reason": f"heuristic strong '{kw}'"}
+        # nếu không tìm được đoạn, vẫn trả true với toàn bộ đầu file
+        return {"has_request": True, "extracted_query": txt[:1500], "reason": "heuristic strong imperative"}
+    if has_keyword and question_marks >= 1:
+        for kw in imperative_keywords + imperative_no_acc:
+            # check both low and low_no_acc
+            if kw in low or kw in low_no_acc:
+                idx = low.find(kw) if kw in low else low_no_acc.find(kw)
+                extracted = txt[max(0, idx-200): idx+500].strip()
+                if extracted:
+                    return {"has_request": True, "extracted_query": extracted[:2000], "reason": f"heuristic keyword '{kw}'"}
+    # Nếu heuristic không chắc (keyword nhưng không có ? hoặc ngược lại), hỏi LLM
+    # Chỉ gọi LLM nếu file không quá dài và heuristic mơ hồ
+    if has_keyword or question_marks == 1 or len(txt.split()) < 50:
+        try:
+            from backend.generation.prompts import build_file_intent_messages
+            msgs = build_file_intent_messages(txt[:8000])
+            # dùng model nhỏ, timeout ngắn
+            raw = _call_ollama(msgs, LLM_MODEL, 256, False, temperature=0.0)
+            # parse JSON
+            # tìm JSON block
+            import re as _re
+            m = _re.search(r"\{.*\}", raw, flags=_re.DOTALL)
+            if m:
+                j = _json.loads(m.group(0))
+                has_req = bool(j.get("has_request", False))
+                eq = str(j.get("extracted_query", "")).strip()[:2000]
+                reason = str(j.get("reason", ""))[:200]
+                # nếu LLM nói has_request nhưng extracted rỗng thì lấy heuristic
+                if has_req and not eq:
+                    eq = txt[:1000]
+                return {"has_request": has_req, "extracted_query": eq, "reason": f"llm: {reason}"}
+        except Exception as e:
+            # fallback heuristic: nếu có keyword thì coi là có yêu cầu
+            if has_keyword:
+                return {"has_request": True, "extracted_query": txt[:1000], "reason": f"fallback keyword sau lỗi llm: {e}"}
+            pass
+    # Mặc định: không có yêu cầu rõ ràng -> hỏi lại user
+    return {"has_request": False, "extracted_query": "", "reason": "không phát hiện yêu cầu rõ ràng"}
+
+
+def auto_answer_file(chunks: list[dict], file_text: str, extracted_query: str, style: str | None = None) -> str:
+    """Sinh câu trả lời tự động cho yêu cầu trong file."""
+    try:
+        from backend.generation.prompts import build_file_auto_answer_messages
+        msgs = build_file_auto_answer_messages(chunks, extracted_query, style=style)
+        temp = STYLE_TEMPERATURE.get(style, 0.3) if style else 0.3
+        if LLM_BACKEND == "ollama":
+            return _call_ollama(msgs, LLM_MODEL, GEN_MAX_TOKENS, LLM_THINK, temperature=temp)
+        else:
+            gen = _get_transformers_gen()
+            prompt = "\n\n".join(f"{m['role']}: {m['content']}" for m in msgs)
+            out = gen(prompt, max_new_tokens=GEN_MAX_TOKENS, do_sample=False, return_full_text=False)
+            return out[0]["generated_text"].strip()
+    except Exception as e:
+        # fallback: trả lời đơn giản bằng generate thường
+        try:
+            from backend.generation.prompts import build_messages
+            ctx = [{"text": c.get("text",""), "metadata": c} for c in chunks[:5]]
+            return generate(ctx, extracted_query or file_text[:2000], style=style)
+        except Exception:
+            raise e
+
+
 # ── Toán học (proxy sang calculator để giữ API thống nhất) ──
 def is_math_question(question: str, history: list[dict] | None = None, last_result=None) -> bool:
     try:

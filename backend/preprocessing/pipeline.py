@@ -35,79 +35,36 @@ def _out_path(source: Path) -> Path:
     return cfg.PROCESSED_DIR / rel.with_suffix(ext)
 
 
-def process_file(path) -> int:
-    path = Path(path)
-    records = load_file(path)
-    # Bổ sung metadata dựa trên đường dẫn tương đối so với DATA_DIR (như loader.load_all)
-    try:
-        rel = path.resolve().relative_to(cfg.DATA_DIR.resolve())
-        if len(rel.parts) > 1:
-            category = rel.parts[0]
-            if len(rel.parts) > 2:
-                subcategory = "/".join(rel.parts[1:-1])
-            else:
-                subcategory = ""
-        else:
-            category = "unknown"
-            subcategory = ""
-        filename = path.name
-        source = str(path)
-    except ValueError:
-        category = "unknown"
-        subcategory = ""
-        filename = path.name
-        source = str(path)
+def _build_chunks_from_records(records: list[dict], filename: str, category: str, subcategory: str, source: str, session_id: str | None = None) -> list[dict]:
+    """Tách chunk từ records đã load - dùng chung cho global và session upload."""
+    from backend.preprocessing.cleaner import clean_text as _clean
+    from backend.preprocessing.chunker import _effective_min_chars as _eff
 
-    for rec in records:
-        # Gắn metadata nếu loader chưa gắn (load_file trả về chỉ text/page/kind)
-        rec.setdefault("category", category)
-        rec.setdefault("subcategory", subcategory)
-        rec.setdefault("filename", filename)
-        rec.setdefault("source", source)
-
-    # Chọn chunker theo config (contextual vs semantic)
     use_contextual = cfg.CHUNK.get("contextual", True)
     chunk_fn = contextual_chunk if use_contextual else semantic_chunk
-
-    out_chunks = []
-    # Parent context tracking cho multimodal chunking
+    out_chunks: list[dict] = []
     parent_text_by_page: dict[int, str] = {}
-    # Lưu parent đầu tiên để dùng cho table/figure
     for rec in records:
-        if rec.get("block_type") == "text" or rec.get("kind") in ("pdf", "pdf_scan", "docx"):
-            # Chỉ lưu parent cho text chính, clean nhẹ để làm context
-            pt = clean_text(rec.get("text", ""))[: cfg.CHUNK.get("parent_chars", 600) if isinstance(cfg.CHUNK, dict) else 600]
+        if rec.get("block_type") == "text" or rec.get("kind") in ("pdf", "pdf_scan", "docx", "txt"):
+            pt = _clean(rec.get("text", ""))[: cfg.CHUNK.get("parent_chars", 600) if isinstance(cfg.CHUNK, dict) else 600]
             if rec.get("page") not in parent_text_by_page and pt:
                 parent_text_by_page[rec["page"]] = pt
-    # Fallback nếu không có parent
-    global_parent = ""
-    if parent_text_by_page:
-        try:
-            global_parent = next(iter(parent_text_by_page.values()))
-        except Exception:
-            global_parent = ""
-
+    global_parent = next(iter(parent_text_by_page.values())) if parent_text_by_page else ""
     for rec in records:
         block_type = rec.get("block_type", "text")
         kind = rec.get("kind", "pdf")
-        # Xác định chunk_type cho metadata
         if kind == "pdf_table" or block_type == "table":
             chunk_type = "table"
         elif kind == "pdf_figure" or block_type == "figure":
             chunk_type = "figure"
         else:
             chunk_type = "text"
-
-        # ── Xử lý bảng có cấu trúc ──
         if chunk_type == "table" and cfg.CHUNK.get("enable_table_struct", True):
             table_data = rec.get("table_data") or rec.get("tables", [None])[0] if isinstance(rec.get("tables"), list) else None
-            # Nếu không có table_data structured thì fallback dùng text
             raw_text = rec.get("text", "")
             if table_data and isinstance(table_data, dict) and table_data.get("rows"):
-                # Xây markdown table có header
                 headers = table_data.get("headers") or []
                 rows = table_data.get("rows") or []
-                # Tạo text dạng structured markdown
                 md_lines = []
                 if headers:
                     md_lines.append(" | ".join(headers))
@@ -115,7 +72,6 @@ def process_file(path) -> int:
                 for r in rows[1 if headers and rows and rows[0]==headers else 0:]:
                     md_lines.append(" | ".join(str(c) for c in r))
                 table_md = "\n".join(md_lines)
-                # Parent context nếu bật
                 parent_ctx = ""
                 if cfg.CHUNK.get("enable_parent_child", True):
                     parent_ctx = parent_text_by_page.get(rec.get("page"), global_parent)[: cfg.CHUNK.get("parent_chars", 600)]
@@ -125,14 +81,11 @@ def process_file(path) -> int:
                         raw_text = f"[BẢNG trang {rec.get('page')}]\n{table_md}"
                 else:
                     raw_text = f"[BẢNG]\n{table_md}"
-            # Bảng thường là 1 chunk duy nhất, không semantic split (giữ nguyên cấu trúc)
-            text = clean_text(raw_text) if block_type != "table" else raw_text.strip()
+            text = _clean(raw_text) if block_type != "table" else raw_text.strip()
             if not text:
                 continue
-            # Nếu bảng quá dài (> max_chars) thì tách theo dòng, không dùng semantic
             max_c = cfg.CHUNK.get("max_chars", 1200)
             if len(text) > max_c:
-                # Tách theo dòng bảng
                 lines = text.splitlines()
                 cur = ""
                 pieces = []
@@ -147,129 +100,190 @@ def process_file(path) -> int:
                     pieces.append(cur)
             else:
                 pieces = [text]
-            # Lưu metadata bảng
             for i, piece in enumerate(pieces):
-                _eff_min = _effective_min_chars(None)
-                if len(piece.strip()) < _eff_min:
-                    # Với bảng, nới lỏng ngưỡng xuống 20 để không mất
-                    if len(piece.strip()) < 20:
-                        continue
-                out_chunks.append(
-                    {
-                        "id": f"{rec['filename']}-{rec['page']}-table-{i}",
-                        "text": piece,
-                        "category": rec["category"],
-                        "subcategory": rec["subcategory"],
-                        "filename": rec["filename"],
-                        "source": rec["source"],
-                        "page": rec["page"],
-                        "chunk_index": len(out_chunks),
-                        "chunk_mode": "table_struct",
-                        "chunk_type": "table",
-                        "block_type": block_type,
-                        "parent_context": parent_text_by_page.get(rec.get("page"), "")[:200],
-                        "bbox": rec.get("bbox"),
-                        "has_table": True,
-                    }
-                )
+                _eff_min = _eff(None)
+                if len(piece.strip()) < _eff_min and len(piece.strip()) < 20:
+                    continue
+                chunk_id_base = f"{session_id}-{filename}" if session_id else filename
+                out_chunks.append({
+                    "id": f"{chunk_id_base}-{rec['page']}-table-{i}-{len(out_chunks)}",
+                    "text": piece,
+                    "category": rec.get("category", category),
+                    "subcategory": rec.get("subcategory", subcategory),
+                    "filename": rec.get("filename", filename),
+                    "source": rec.get("source", source),
+                    "page": rec["page"],
+                    "chunk_index": len(out_chunks),
+                    "chunk_mode": "table_struct",
+                    "chunk_type": "table",
+                    "block_type": block_type,
+                    "parent_context": parent_text_by_page.get(rec.get("page"), "")[:200],
+                    "bbox": rec.get("bbox"),
+                    "has_table": True,
+                    "session_id": session_id,
+                })
             continue
-
-        # ── Xử lý hình ảnh/figure ──
         if chunk_type == "figure":
             raw_text = rec.get("text", "")
-            # Parent context cho figure để LLM hiểu ngữ cảnh xung quanh
             if cfg.CHUNK.get("enable_parent_child", True):
                 parent_ctx = parent_text_by_page.get(rec.get("page"), global_parent)[: cfg.CHUNK.get("parent_chars", 600)]
                 if parent_ctx:
                     raw_text = f"[Bối cảnh trang {rec.get('page')}]\n{parent_ctx}\n\n[HÌNH ẢNH - {rec.get('filename')} trang {rec.get('page')} bbox {rec.get('bbox')}]\n{raw_text}"
-            # Nếu bật vision description sau này sẽ enrich thêm, hiện chỉ là placeholder
-            # Với figure, giữ nguyên 1 chunk
             text = raw_text.strip()
             if not text or len(text) < 20:
                 continue
-            out_chunks.append(
-                {
-                    "id": f"{rec['filename']}-{rec['page']}-figure-{len(out_chunks)}",
-                    "text": text,
-                    "category": rec["category"],
-                    "subcategory": rec["subcategory"],
-                    "filename": rec["filename"],
-                    "source": rec["source"],
-                    "page": rec["page"],
-                    "chunk_index": len(out_chunks),
-                    "chunk_mode": "figure",
-                    "chunk_type": "figure",
-                    "block_type": block_type,
-                    "parent_context": parent_text_by_page.get(rec.get("page"), "")[:200],
-                    "bbox": rec.get("bbox"),
-                    "has_image": True,
-                }
-            )
+            chunk_id_base = f"{session_id}-{filename}" if session_id else filename
+            out_chunks.append({
+                "id": f"{chunk_id_base}-{rec['page']}-figure-{len(out_chunks)}",
+                "text": text,
+                "category": rec.get("category", category),
+                "subcategory": rec.get("subcategory", subcategory),
+                "filename": rec.get("filename", filename),
+                "source": rec.get("source", source),
+                "page": rec["page"],
+                "chunk_index": len(out_chunks),
+                "chunk_mode": "figure",
+                "chunk_type": "figure",
+                "block_type": block_type,
+                "parent_context": parent_text_by_page.get(rec.get("page"), "")[:200],
+                "bbox": rec.get("bbox"),
+                "has_image": True,
+                "session_id": session_id,
+            })
             continue
-
-        # ── Xử lý text thường (paragraph, section) ──
-        text = clean_text(rec["text"])
+        text = _clean(rec.get("text", ""))
         if not text:
             continue
-        # Truyền metadata để chunk giàu ngữ cảnh (heading, filename, category)
         meta_for_chunk = {
-            "filename": rec["filename"],
-            "category": rec["category"],
-            "subcategory": rec["subcategory"],
-            "source": rec["source"],
+            "filename": rec.get("filename", filename),
+            "category": rec.get("category", category),
+            "subcategory": rec.get("subcategory", subcategory),
+            "source": rec.get("source", source),
             "page": rec["page"],
         }
         if use_contextual:
-            # contextual_chunk đã tự xử lý heading/overlap/llm
             pieces = chunk_fn(text, embed, metadata=meta_for_chunk)
         else:
             pieces = chunk_fn(text, embed)
-
         for i, piece in enumerate(pieces):
-            # Đồng bộ với ngưỡng hiệu dụng của chunker (max(min_chars, 20), kẹp theo max_chars)
-            _eff_min = _effective_min_chars(None)
+            _eff_min = _eff(None)
             if len(piece.strip()) < _eff_min:
                 continue
-            out_chunks.append(
-                {
-                    "id": f"{rec['filename']}-{rec['page']}-{i}",
-                    "text": piece,
-                    "category": rec["category"],
-                    "subcategory": rec["subcategory"],
-                    "filename": rec["filename"],
-                    "source": rec["source"],
-                    "page": rec["page"],
-                    "chunk_index": len(out_chunks),
-                    "chunk_mode": "contextual" if use_contextual else "semantic",
-                    "chunk_type": "text",
-                    "block_type": block_type,
-                    "parent_context": parent_text_by_page.get(rec["page"], "")[:100] if cfg.CHUNK.get("enable_parent_child") else None,
-                    "bbox": rec.get("bbox"),
-                }
-            )
-    # Dedup toàn file để loại trùng do nhiều page có câu lặp (học kỳ hè...)
+            chunk_id_base = f"{session_id}-{filename}" if session_id else filename
+            out_chunks.append({
+                "id": f"{chunk_id_base}-{rec['page']}-{i}-{len(out_chunks)}",
+                "text": piece,
+                "category": rec.get("category", category),
+                "subcategory": rec.get("subcategory", subcategory),
+                "filename": rec.get("filename", filename),
+                "source": rec.get("source", source),
+                "page": rec["page"],
+                "chunk_index": len(out_chunks),
+                "chunk_mode": "contextual" if use_contextual else "semantic",
+                "chunk_type": "text",
+                "block_type": block_type,
+                "parent_context": parent_text_by_page.get(rec.get("page"), "")[:100] if cfg.CHUNK.get("enable_parent_child") else None,
+                "bbox": rec.get("bbox"),
+                "session_id": session_id,
+            })
     if out_chunks:
         try:
             from backend.utils.dedup import deduplicate_chunk_dicts
             before = len(out_chunks)
-            out_chunks = deduplicate_chunk_dicts(
-                out_chunks,
-                threshold=cfg.CHUNK.get("dedup_threshold", 0.92),
-                exact_only=cfg.CHUNK.get("dedup_exact_only", False),
-            )
+            out_chunks = deduplicate_chunk_dicts(out_chunks, threshold=cfg.CHUNK.get("dedup_threshold", 0.92), exact_only=cfg.CHUNK.get("dedup_exact_only", False))
             if len(out_chunks) != before:
-                print(f"[dedup] {path.name}: {before} -> {len(out_chunks)} chunks (loại {before-len(out_chunks)} trùng)")
-            # Re-index chunk_index sau dedup để id không trùng
+                print(f"[dedup] {filename}: {before} -> {len(out_chunks)} chunks")
             for idx, ch in enumerate(out_chunks):
                 ch["chunk_index"] = idx
-                ch["id"] = f"{ch['filename']}-{ch['page']}-{idx}"
+                chunk_id_base = f"{session_id}-{filename}" if session_id else filename
+                # giữ id ổn định sau dedup
+                ch["id"] = f"{chunk_id_base}-{ch['page']}-{idx}"
         except Exception as e:
-            print(f"[dedup] cảnh báo {path.name}: {e}")
+            print(f"[dedup] cảnh báo {filename}: {e}")
+    # Fallback cho upload: nếu file ngắn bị lọc hết thì giữ lại 1 chunk duy nhất
+    if not out_chunks and session_id and records:
+        try:
+            from backend.preprocessing.cleaner import clean_text as _ct2
+            raw = "\n".join(r.get("text","") for r in records).strip()
+            cleaned = _ct2(raw) if raw else raw
+            if cleaned and len(cleaned.strip()) >= 10:
+                # cắt 1200 nếu quá dài
+                txt = cleaned[:1200] if len(cleaned) > 1200 else cleaned
+                out_chunks = [{
+                    "id": f"{session_id}-{filename}-0-0",
+                    "text": txt,
+                    "category": "uploaded",
+                    "subcategory": "",
+                    "filename": filename,
+                    "source": source,
+                    "page": 0,
+                    "chunk_index": 0,
+                    "chunk_mode": "uploaded_fallback",
+                    "chunk_type": "text",
+                    "block_type": "text",
+                    "session_id": session_id,
+                }]
+        except Exception as e:
+            print(f"[fallback] lỗi {filename}: {e}")
+    return out_chunks
+
+
+def process_file(path, session_id: str | None = None) -> int:
+    """Xử lý 1 file -> parquet (global) hoặc trả chunk với session_id."""
+    path = Path(path)
+    records = load_file(path)
+    if not records:
+        return 0
+    try:
+        rel = path.resolve().relative_to(cfg.DATA_DIR.resolve())
+        if len(rel.parts) > 1:
+            category = rel.parts[0]
+            subcategory = "/".join(rel.parts[1:-1]) if len(rel.parts) > 2 else ""
+        else:
+            category = "unknown"
+            subcategory = ""
+        filename = path.name
+        source = str(path)
+    except ValueError:
+        category = "uploaded" if session_id else "unknown"
+        subcategory = ""
+        filename = path.name
+        source = str(path)
+    for rec in records:
+        rec.setdefault("category", category)
+        rec.setdefault("subcategory", subcategory)
+        rec.setdefault("filename", filename)
+        rec.setdefault("source", source)
+    out_chunks = _build_chunks_from_records(records, filename, category, subcategory, source, session_id=session_id)
+    if session_id:
+        # Không ghi parquet chung, trả số chunks để caller tự embed/add
+        return out_chunks  # type: ignore[return-value]
     out = _out_path(path)
-    # Luu dang parquet thong qua storage helper (fallback jsonl neu thieu pyarrow)
     from backend.preprocessing.storage import save_chunks
     save_chunks(out, out_chunks)
     return len(out_chunks)
+
+
+def process_file_to_chunks(path: Path, session_id: str, filename_override: str | None = None) -> list[dict]:
+    """Dành cho upload theo phiên: trả về chunks với session_id, không ghi parquet."""
+    path = Path(path)
+    records = load_file(path)
+    if not records:
+        return []
+    # Giới hạn số trang để hỗ trợ dung lượng lớn mà không OOM
+    max_pages = getattr(cfg, "MAX_UPLOAD_PAGES", 500)
+    if len(records) > max_pages:
+        records = records[:max_pages]
+    filename = filename_override or path.name
+    source = str(path)
+    # Đặt category uploaded để phân biệt
+    for rec in records:
+        rec.setdefault("category", "uploaded")
+        rec.setdefault("subcategory", "")
+        rec.setdefault("filename", filename)
+        rec.setdefault("source", source)
+    chunks = _build_chunks_from_records(records, filename, "uploaded", "", source, session_id=session_id)
+    return chunks
 
 
 def process_all(data_dir: Path | None = None) -> int:

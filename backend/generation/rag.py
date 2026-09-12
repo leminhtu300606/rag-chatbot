@@ -56,15 +56,15 @@ def _use_hybrid() -> bool:
     except Exception:
         return True
 
-def _do_retrieve(query: str, category, top_k: int):
-    """Unified retrieve: hybrid nếu config bật, fallback vector."""
+def _do_retrieve(query: str, category, top_k: int, session_id: str | None = None):
+    """Unified retrieve: hybrid nếu config bật, fallback vector. Hỗ trợ session_id."""
     if _use_hybrid() and hybrid_retrieve is not None:
         try:
-            return hybrid_retrieve(query, top_k=top_k, category=category)
+            return hybrid_retrieve(query, top_k=top_k, category=category, session_id=session_id)
         except Exception as e:
             print(f"[rag] hybrid fail, fallback vector: {e}")
     # Fallback vector
-    return retrieve(query, category=category, top_k=top_k, dedup=True)
+    return retrieve(query, category=category, top_k=top_k, dedup=True, session_id=session_id)
 
 
 def _prepare_history(
@@ -129,6 +129,7 @@ def answer(
     rerank_k: int = None,
     style: str | None = None,
     last_math_result: str | None = None,
+    session_id: str | None = None,
 ) -> dict:
     """Trả lời câu hỏi ở chế độ đơn lượt (single-turn) - hỗ trợ xã giao và toán học."""
     # Phát hiện đổi phong cách
@@ -301,7 +302,7 @@ def answer(
     query_for_retrieval = effective_question
     # Validate tool call: AI chỉ đề xuất, backend kiểm tra
     validate_tool_call("retrieve", {"category": category, "top_k": fetch_k})
-    context = _do_retrieve(query_for_retrieval, category=category, top_k=fetch_k)
+    context = _do_retrieve(query_for_retrieval, category=category, top_k=fetch_k, session_id=session_id)
     # Fallback dedup nếu retriever chưa dedup
     try:
         from backend.utils.dedup import deduplicate_docs
@@ -333,6 +334,7 @@ def answer_with_history(
     rerank_k: int = None,
     style: str | None = None,
     last_math_result: str | None = None,
+    session_id: str | None = None,
 ) -> dict:
     """Trả lời có ngữ cảnh hội thoại (conversational) - hỗ trợ đổi phong cách qua câu tự nhiên và toán học."""
     # Phát hiện đổi phong cách
@@ -554,7 +556,7 @@ def answer_with_history(
     validate_tool_call("retrieve", {"category": category, "top_k": fetch_k})
 
     query_for_retrieval = standalone_q if standalone_q and standalone_q.strip() else effective_question
-    context = _do_retrieve(query_for_retrieval, category=category, top_k=fetch_k)
+    context = _do_retrieve(query_for_retrieval, category=category, top_k=fetch_k, session_id=session_id)
     try:
         from backend.utils.dedup import deduplicate_docs
         context = deduplicate_docs(context, threshold=0.92)

@@ -56,7 +56,7 @@ def _normalize_scores(docs: List[Dict], score_key: str = "score") -> List[float]
         return [1.0 for _ in scores]
     return [(s - mn) / (mx - mn) for s in scores]
 
-def hybrid_retrieve(query: str, top_k: int = 3, category: str | None = None, vector_k: int | None = None, bm25_k: int | None = None) -> List[Dict]:
+def hybrid_retrieve(query: str, top_k: int = 3, category: str | None = None, vector_k: int | None = None, bm25_k: int | None = None, session_id: str | None = None) -> List[Dict]:
     """
     Hybrid search: vector_weight * norm_vector + bm25_weight * norm_bm25
 
@@ -76,8 +76,8 @@ def hybrid_retrieve(query: str, top_k: int = 3, category: str | None = None, vec
         hybrid_enabled = True
 
     if not hybrid_enabled:
-        # Fallback pure vector
-        return vector_retrieve(query, top_k=top_k, category=category, dedup=True)
+        # Fallback pure vector (có session_id nếu truyền)
+        return vector_retrieve(query, top_k=top_k, category=category, dedup=True, session_id=session_id)
 
     vk = vector_k or (top_k * 2)
     bk = bm25_k or (top_k * 2)
@@ -85,7 +85,7 @@ def hybrid_retrieve(query: str, top_k: int = 3, category: str | None = None, vec
     vec_docs = []
     bm25_docs = []
     try:
-        vec_docs = vector_retrieve(query, top_k=vk, category=category, dedup=True)
+        vec_docs = vector_retrieve(query, top_k=vk, category=category, dedup=True, session_id=session_id)
     except Exception as e:
         print(f"[hybrid] vector fail: {e}")
         vec_docs = []

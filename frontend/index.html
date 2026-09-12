@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ChatGPT — RAG Chatbot Học viện Kỹ thuật Mật mã</title>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css?v=20250918" />
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
   <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 </head>
@@ -107,10 +107,17 @@
           </div>
         </div>
 
+        <!-- Uploads bar (per-session, ephemeral) -->
+        <div id="uploads-bar" class="uploads-bar hidden">
+          <div class="uploads-head"><i class="fa-solid fa-paperclip"></i> File trong phiên <span id="uploads-count" class="hint"></span> <button id="uploads-clear" class="hint" style="margin-left:auto;background:none;border:none;color:var(--muted);cursor:pointer;font-size:11px">Xóa tất cả</button></div>
+          <div id="uploads-list" class="uploads-list"></div>
+        </div>
         <!-- Composer - ChatGPT style -->
         <div class="composer">
           <div class="composer-inner">
             <div class="input-box">
+              <button id="attach-btn" class="attach-btn" title="Đính kèm PDF/DOCX/TXT (tối đa ~100MB)"><i class="fa-solid fa-paperclip"></i></button>
+              <input id="file-input" type="file" accept=".pdf,.docx,.txt,.md,.csv" hidden />
               <textarea id="input" rows="1" placeholder="Nhắn cho RAG Chatbot..."></textarea>
               <button id="send" class="send-btn" aria-label="Gửi"><i class="fa-solid fa-arrow-up"></i></button>
             </div>
@@ -151,6 +158,6 @@
     </form>
   </dialog>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=20250918"></script>
 </body>
 </html>

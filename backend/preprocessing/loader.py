@@ -386,12 +386,38 @@ def load_pdf(path: Path) -> list[dict]:
     return pages
 
 
+def load_txt(path: Path) -> list[dict]:
+    """Đọc file TXT/MD với fallback encoding."""
+    text = ""
+    for enc in ("utf-8", "utf-8-sig", "cp1258", "windows-1258", "iso-8859-1"):
+        try:
+            text = Path(path).read_text(encoding=enc)
+            if text and text.strip():
+                break
+        except Exception:
+            continue
+    if not text or not text.strip():
+        try:
+            # fallback binary detect
+            raw = Path(path).read_bytes()
+            text = raw.decode("utf-8", errors="ignore")
+        except Exception:
+            text = ""
+    if not text.strip():
+        return []
+    # Tách theo trang logic: mỗi ~3000 chars coi như 1 page để giữ metadata
+    # Giữ nguyên text gốc để chunker xử lý semantic
+    return [{"text": text.strip(), "page": 0, "kind": "txt", "block_type": "text"}]
+
+
 def load_file(path: Path) -> list[dict]:
     ext = Path(path).suffix.lower()
     if ext == ".docx":
         return load_docx(path)
     if ext == ".pdf":
         return load_pdf(path)
+    if ext in (".txt", ".md", ".csv", ".log"):
+        return load_txt(path)
     return []
 
 

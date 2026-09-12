@@ -205,6 +205,20 @@ STYLE_TEMPERATURE = {
     "plain": 0.5,
 }
 
+# ── Upload theo phiên (chỉ lưu tại phiên, không vào kho chung) ──
+UPLOAD_DIR = BASE_DIR / "data" / "uploads"  # lưu tạm file gốc theo session
+PROCESSED_UPLOADS_DIR = BASE_DIR / "data" / "processed_uploads"  # không dùng cho RAG chung
+UPLOAD_ALLOWED_EXTS = {".pdf", ".docx", ".txt", ".md", ".csv", ".log"}
+# Hỗ trợ dung lượng tối đa có thể - giới hạn mềm 100MB, streaming ghi file để không OOM
+MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100MB, có thể tăng nếu RAM cho phép
+MAX_UPLOADS_PER_SESSION = 10
+MAX_UPLOAD_PAGES = 500  # giới hạn số trang PDF để tránh OCR quá lâu
+UPLOAD_TTL_SECONDS = 24 * 3600  # cùng TTL phiên
+# Tự động xử lý file: nếu file chứa yêu cầu rõ ràng thì trả lời ngay, không thì hỏi lại user
+UPLOAD_AUTO_ANSWER = True
+UPLOAD_AUTO_ASKBACK = "Mình đã nhận file **{filename}** ({pages} trang, {chunks} đoạn). Bạn muốn mình làm gì với file này? Ví dụ: tóm tắt, trích câu hỏi và trả lời, hay bạn có câu hỏi cụ thể nào về file?"
+UPLOAD_SUMMARY_MAX_CHARS = 8000  # cắt text đưa vào LLM để không quá dài
+
 # ── Xã giao mở rộng: chỉ cung cấp thông tin ngoài lề khi có nguồn chính xác hoặc kiến thức huấn luyện ──
 # Mặc định trả lời theo giọng đời thường (casual)
 ENABLE_SOCIAL = True

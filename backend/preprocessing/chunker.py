@@ -369,7 +369,11 @@ def split_by_sections(text: str) -> list[tuple[str, str]]:
 
 
 def _add_overlap(chunks: list[str], overlap_sentences: int = 1) -> list[str]:
-    """Thêm overlap câu giữa các chunk liên tiếp để giữ ngữ cảnh."""
+    """
+    Thêm overlap câu giữa các chunk liên tiếp.
+    Lưu ý: chỉ dùng nội bộ trong cùng một Điều/Chương, không dùng toàn cục.
+    Không cho phép vượt max_chars.
+    """
     if overlap_sentences <= 0 or len(chunks) <= 1:
         return chunks
     overlapped = []
@@ -378,16 +382,17 @@ def _add_overlap(chunks: list[str], overlap_sentences: int = 1) -> list[str]:
         if i == 0:
             overlapped.append(chunk)
             continue
-        # Lấy N câu cuối của chunk trước làm tiền tố
+        # Lấy N câu cuối của chunk trước làm tiền tố (chỉ trong cùng section)
         prev_sents = split_sentences(chunks[i - 1])
         overlap = " ".join(prev_sents[-overlap_sentences:]) if len(prev_sents) >= overlap_sentences else chunks[i - 1][:200]
-        # Tránh trùng lặp hoàn toàn
-        if overlap and overlap not in chunk[:300]:
+        # Tránh trùng lặp hoàn toàn - kiểm tra overlap đã có trong chunk chưa
+        if overlap and overlap not in chunk[:350]:
             enriched = f"{overlap} {chunk}"
-            # Cắt nếu quá max_chars thì giữ chunk gốc
-            if len(enriched) <= effective_max + _MAX_OVERLAP_EXTRA:
+            # Cho phép vượt nhẹ 40 ký tự để giữ ngữ cảnh, sẽ được cắt gọn sau khi gắn heading nếu cần
+            if len(enriched) <= effective_max + 40:
                 overlapped.append(enriched)
             else:
+                # Nếu vượt quá nhiều, giữ nguyên chunk gốc
                 overlapped.append(chunk)
         else:
             overlapped.append(chunk)
@@ -523,48 +528,72 @@ def contextual_chunk(
                 sec_text[i:i+effective_max] for i in range(0, len(sec_text), effective_max)
             ]
 
+        if not sec_chunks:
+            continue
+
+        # --- Gộp đoạn vụn thô trong cùng section trước khi xử lý tiếp ---
+        # Tránh mất đoạn ngắn trong cùng Điều, cho phép vượt nhẹ 150 ký tự để cứu đoạn ngắn
+        # Thực hiện trước heading/overlap để không nhân đôi heading
+        _COALESCE_EXTRA = 150
+        if len(sec_chunks) > 1:
+            coalesced_raw: list[str] = []
+            buf = ""
+            for c in sec_chunks:
+                if not buf:
+                    buf = c
+                elif len(buf.strip()) < effective_min and len(buf) + len(c) + 1 <= effective_max + _COALESCE_EXTRA:
+                    buf = f"{buf} {c}"
+                elif len(c.strip()) < effective_min and len(buf) + len(c) + 1 <= effective_max + _COALESCE_EXTRA:
+                    buf = f"{buf} {c}"
+                else:
+                    coalesced_raw.append(buf)
+                    buf = c
+            if buf:
+                coalesced_raw.append(buf)
+            if len(coalesced_raw) > 1 and len(coalesced_raw[-1].strip()) < effective_min:
+                if len(coalesced_raw[-2]) + len(coalesced_raw[-1]) + 1 <= effective_max + _COALESCE_EXTRA:
+                    coalesced_raw[-2] = f"{coalesced_raw[-2]} {coalesced_raw[-1]}"
+                    coalesced_raw.pop()
+            sec_chunks = coalesced_raw
+
+        # --- Overlap chỉ trong cùng Điều/Chương, trước khi gắn heading để tránh lặp heading ---
+        # Đây là điểm sửa chính cho vấn đề xuyên ranh giới Điều/Chương
+        if context_window and context_window > 0 and not use_llm_context and len(sec_chunks) > 1:
+            sec_chunks = _add_overlap(sec_chunks, overlap_sentences=context_window)
+
+        # Gắn heading / LLM context cho từng chunk trong section
+        enriched_sec: list[str] = []
         for chunk in sec_chunks:
             enriched = chunk
             if heading_enrich and heading:
                 enriched = _enrich_with_heading(enriched, heading, metadata)
             if use_llm_context:
                 enriched = _generate_llm_context(enriched, heading, doc_snippet, metadata)
-            all_chunks.append(enriched)
+            enriched_sec.append(enriched)
 
-    # Overlap giữa các chunk liên tiếp (toàn cục, không phân biệt section)
-    if context_window and context_window > 0:
-        # Chỉ overlap nếu chunk chưa có LLM context (đã đủ dài)
-        if not use_llm_context:
-            all_chunks = _add_overlap(all_chunks, overlap_sentences=context_window)
+        # Đảm bảo không vượt max_chars sau khi gắn heading (cắt thân nếu cần, giữ heading)
+        # Cắt chính xác để len(strip) vẫn đạt ngưỡng, tránh bị lọc do thừa khoảng trắng
+        for idx, c in enumerate(enriched_sec):
+            if len(c) > effective_max:
+                if ":\n" in c and heading_enrich and heading:
+                    pref, body = c.split(":\n", 1)
+                    pref += ":\n"
+                    body = body.strip()
+                    body = body[: max(0, effective_max - len(pref))]
+                    enriched_sec[idx] = (pref + body).strip()
+                    # Đảm bảo không ngắn hơn ngưỡng do cắt quá tay - nếu vẫn ngắn, giữ nguyên đã cắt
+                    if len(enriched_sec[idx].strip()) < effective_min and len(c.strip()) >= effective_min:
+                        # Trường hợp hiếm: heading dài khiến thân bị cắt quá ngắn, giữ lại tối đa có thể
+                        enriched_sec[idx] = c[:effective_max].strip()
+                else:
+                    enriched_sec[idx] = c[:effective_max].strip()
 
-    # Tinh chỉnh cho dữ liệu phức tạp: gộp các đoạn vụn ngắn hơn ngưỡng hiệu dụng trước khi lọc
-    # Giúp đoạn ngắn nhưng có giá trị không bị loại khi ngưỡng mong muốn cao
-    if len(all_chunks) > 1:
-        coalesced_all: list[str] = []
-        buf = ""
-        for c in all_chunks:
-            if not buf:
-                buf = c
-            elif len(buf.strip()) < effective_min and len(buf) + len(c) + 1 <= effective_max + _MAX_OVERLAP_EXTRA:
-                # Gộp đoạn ngắn với đoạn kề để đạt ngưỡng, vẫn giữ heading của đoạn đầu
-                buf = f"{buf} {c}"
-            elif len(c.strip()) < effective_min and len(buf) + len(c) + 1 <= effective_max + _MAX_OVERLAP_EXTRA:
-                buf = f"{buf} {c}"
-            else:
-                coalesced_all.append(buf)
-                buf = c
-        if buf:
-            coalesced_all.append(buf)
-        # Gộp đoạn cuối nếu vẫn quá ngắn
-        if len(coalesced_all) > 1 and len(coalesced_all[-1].strip()) < effective_min:
-            if len(coalesced_all[-2]) + len(coalesced_all[-1]) + 1 <= effective_max + _MAX_OVERLAP_EXTRA:
-                coalesced_all[-2] = f"{coalesced_all[-2]} {coalesced_all[-1]}"
-                coalesced_all.pop()
-        all_chunks = coalesced_all
+        all_chunks.extend(enriched_sec)
 
     # Lọc lại theo ngưỡng hiệu dụng (tôn trọng cấu hình + sàn 20)
     # Lưu ý: sau khi enrich heading, độ dài tăng nên kiểm tra sau enrich mới chính xác
-    filtered = [c for c in all_chunks if len(c.strip()) >= effective_min]
+    # Giữ tất cả đoạn đạt sàn an toàn (>=20) để không mất Điều ngắn; việc gộp đoạn vụn đã xử lý per-section ở trên
+    filtered = [c for c in all_chunks if len(c.strip()) >= _MIN_FLOOR]
     if not filtered:
         # Bảo toàn dữ liệu phức tạp: nếu không có đoạn nào đạt ngưỡng mong muốn nhưng có đoạn đạt sàn, giữ lại
         fallback = [c for c in all_chunks if len(c.strip()) >= _MIN_FLOOR]

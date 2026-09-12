@@ -143,3 +143,59 @@ def query_by_category(category: str, limit: int = 5) -> dict:
     col = get_collection()
     return col.get(where={"category": category}, limit=limit, include=["documents", "metadatas"])
 
+
+def delete_by_session(session_id: str) -> int:
+    """Xóa tất cả chunk có session_id = sid (ephemeral upload)."""
+    if not session_id:
+        return 0
+    col = get_collection()
+    try:
+        # Chroma delete support where filter
+        col.delete(where={"session_id": session_id})
+        return 1
+    except Exception as e:
+        print(f"[vectorstore] delete_by_session lỗi {session_id}: {e}")
+        # Fallback: get ids rồi delete
+        try:
+            res = col.get(where={"session_id": session_id}, include=[])
+            ids = res.get("ids", [])
+            if ids:
+                col.delete(ids=ids)
+            return len(ids)
+        except Exception as e2:
+            print(f"[vectorstore] fallback delete lỗi: {e2}")
+            return 0
+
+
+def count_by_session(session_id: str) -> int:
+    try:
+        col = get_collection()
+        res = col.get(where={"session_id": session_id}, include=[])
+        return len(res.get("ids", []))
+    except Exception:
+        return 0
+
+
+def list_uploads_by_session(session_id: str) -> list[dict]:
+    """Liệt kê file đã upload theo phiên (group by filename)."""
+    try:
+        col = get_collection()
+        res = col.get(where={"session_id": session_id}, include=["metadatas"])
+        metas = res.get("metadatas", []) or []
+        from collections import Counter
+        cnt = Counter(m.get("filename", "unknown") for m in metas if m)
+        # enrich with sample metadata
+        seen = {}
+        for m in metas:
+            fn = m.get("filename", "unknown")
+            if fn not in seen:
+                seen[fn] = m
+        out = []
+        for fn, c in cnt.items():
+            sm = seen.get(fn, {})
+            out.append({"filename": fn, "chunks": c, "page": sm.get("page"), "category": sm.get("category"), "source": sm.get("source")})
+        return out
+    except Exception as e:
+        print(f"[vectorstore] list_uploads lỗi: {e}")
+        return []
+

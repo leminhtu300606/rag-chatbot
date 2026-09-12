@@ -25,7 +25,7 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(_ROOT))
 
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -35,6 +35,8 @@ import uuid
 import threading
 import json
 import re
+import shutil
+import os
 
 import backend.config as cfg
 # Security
@@ -200,19 +202,40 @@ _load_sessions()
 def _cleanup_sessions():
     now = time.time()
     removed = False
+    expired_ids: list[str] = []
     with _sessions_lock:
         expired = [sid for sid, v in _sessions.items() if now - v.get("updated_at", 0) > SESSION_TTL_SECONDS]
         for sid in expired:
             _sessions.pop(sid, None)
+            expired_ids.append(sid)
             removed = True
         # gioi han so luong: xoa cu nhat
         if len(_sessions) > MAX_SESSIONS:
             sorted_sids = sorted(_sessions.items(), key=lambda x: x[1].get("updated_at", 0))
             for sid, _ in sorted_sids[: len(_sessions) - MAX_SESSIONS]:
                 _sessions.pop(sid, None)
+                expired_ids.append(sid)
                 removed = True
     if removed:
         _save_sessions()
+    # Xóa vector + file upload của phiên hết hạn (không chặn)
+    if expired_ids:
+        try:
+            from backend.indexing.vectorstore import delete_by_session
+            for sid in expired_ids:
+                try:
+                    delete_by_session(sid)
+                except Exception:
+                    pass
+                try:
+                    import shutil as _sh2
+                    up_dir = cfg.UPLOAD_DIR / sid
+                    if up_dir.exists():
+                        _sh2.rmtree(up_dir, ignore_errors=True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 def _get_or_create_session(session_id: Optional[str], title: Optional[str] = None, style: Optional[str] = None) -> str:
     _cleanup_sessions()
@@ -449,6 +472,19 @@ async def delete_session(session_id: str):
         else:
             raise HTTPException(status_code=404, detail="Session not found")
     _save_sessions()
+    # Xóa vector + file upload của phiên (chỉ lưu tại phiên)
+    try:
+        from backend.indexing.vectorstore import delete_by_session
+        await run_in_threadpool(lambda: delete_by_session(session_id))
+    except Exception as e:
+        print(f"[upload] delete vectors lỗi {session_id}: {e}")
+    try:
+        import shutil as _sh
+        up_dir = cfg.UPLOAD_DIR / session_id
+        if up_dir.exists():
+            _sh.rmtree(up_dir, ignore_errors=True)
+    except Exception as e:
+        print(f"[upload] delete files lỗi {session_id}: {e}")
     return {"deleted": session_id}
 
 @app.get("/api/sessions")
@@ -510,6 +546,273 @@ async def update_session(session_id: str, req: UpdateSessionRequest):
         sess["updated_at"] = time.time()
     _save_sessions()
     return {"session_id": session_id, "title": req.title.strip()[:50]}
+
+
+# ── Upload theo phiên (chỉ lưu tại phiên) ──
+# Hỗ trợ dung lượng lớn: streaming ghi file, không load hết RAM
+@app.get("/api/sessions/{session_id}/uploads")
+async def list_uploads(session_id: str):
+    try:
+        session_id = validate_session_id(session_id)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    _get_or_create_session(session_id)
+    try:
+        from backend.indexing.vectorstore import list_uploads_by_session, count_by_session
+        files = await run_in_threadpool(lambda: list_uploads_by_session(session_id))
+        total_chunks = await run_in_threadpool(lambda: count_by_session(session_id))
+        # Lấy danh sách file trên đĩa
+        up_dir = cfg.UPLOAD_DIR / session_id
+        disk_files = []
+        if up_dir.exists():
+            for p in up_dir.iterdir():
+                if p.is_file():
+                    try:
+                        disk_files.append({"filename": p.name, "size": p.stat().st_size, "path": str(p)})
+                    except Exception:
+                        pass
+        return {"session_id": session_id, "files": files, "total_chunks": total_chunks, "disk_files": disk_files}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/sessions/{session_id}/uploads/{filename}")
+async def delete_upload_file(session_id: str, filename: str):
+    try:
+        session_id = validate_session_id(session_id)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # sanitize filename
+    safe_name = re.sub(r"[^a-zA-Z0-9._\- ]", "_", filename).strip()[:200]
+    if not safe_name:
+        raise HTTPException(status_code=400, detail="Tên file không hợp lệ")
+    try:
+        from backend.indexing.vectorstore import get_collection
+        col = get_collection()
+        # Xóa vector theo filename + session_id
+        try:
+            col.delete(where={"$and": [{"session_id": session_id}, {"filename": safe_name}]})
+        except Exception:
+            # fallback
+            try:
+                res = col.get(where={"session_id": session_id}, include=["metadatas"])
+                ids = [res["ids"][i] for i, m in enumerate(res.get("metadatas", [])) if m and m.get("filename") == safe_name]
+                if ids:
+                    col.delete(ids=ids)
+            except Exception as e2:
+                print(f"[upload] delete fallback lỗi: {e2}")
+        # Xóa file đĩa
+        up_path = cfg.UPLOAD_DIR / session_id / safe_name
+        if up_path.exists():
+            try:
+                up_path.unlink()
+            except Exception:
+                pass
+        return {"deleted": safe_name, "session_id": session_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/sessions/{session_id}/upload")
+async def upload_session_file(session_id: str, file: UploadFile = File(...)):
+    # Rate limit nhẹ
+    # Validate session_id
+    try:
+        session_id = validate_session_id(session_id)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"session_id lỗi: {e}")
+    _get_or_create_session(session_id)
+    # Kiểm tra số lượng file hiện tại
+    try:
+        from backend.indexing.vectorstore import count_by_session
+        cur_cnt = await run_in_threadpool(lambda: count_by_session(session_id))
+        # count files not chunks - dùng list
+        from backend.indexing.vectorstore import list_uploads_by_session
+        cur_files = await run_in_threadpool(lambda: list_uploads_by_session(session_id))
+        if len(cur_files) >= getattr(cfg, "MAX_UPLOADS_PER_SESSION", 10):
+            raise HTTPException(status_code=400, detail=f"Phiên đã đạt giới hạn {cfg.MAX_UPLOADS_PER_SESSION} file. Xóa bớt file cũ trước khi tải thêm.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    # Validate filename + ext
+    orig_name = file.filename or "upload"
+    # sanitize
+    safe_name = re.sub(r"[^a-zA-Z0-9._\-\(\) ]", "_", orig_name).strip()
+    if not safe_name:
+        safe_name = f"file_{int(time.time())}"
+    # giữ đuôi
+    ext = Path(safe_name).suffix.lower()
+    if not ext:
+        # đoán từ orig
+        ext = Path(orig_name).suffix.lower()
+        safe_name += ext
+    allowed = getattr(cfg, "UPLOAD_ALLOWED_EXTS", {".pdf", ".docx", ".txt", ".md"})
+    if ext not in allowed:
+        raise HTTPException(status_code=400, detail=f"Định dạng {ext} không hỗ trợ. Chỉ hỗ trợ: {', '.join(sorted(allowed))}")
+    # Streaming ghi file để hỗ trợ dung lượng lớn (100MB)
+    up_dir = cfg.UPLOAD_DIR / session_id
+    up_dir.mkdir(parents=True, exist_ok=True)
+    # Tránh trùng tên: thêm timestamp nếu đã tồn tại
+    target_path = up_dir / safe_name
+    if target_path.exists():
+        stem = target_path.stem
+        target_path = up_dir / f"{stem}_{int(time.time())}{ext}"
+        safe_name = target_path.name
+    # Ghi streaming 8KB chunk
+    max_size = getattr(cfg, "MAX_UPLOAD_SIZE", 100*1024*1024)
+    written = 0
+    try:
+        with open(target_path, "wb") as out_f:
+            while True:
+                chunk = await file.read(8192)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_size:
+                    out_f.close()
+                    try:
+                        target_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    raise HTTPException(status_code=413, detail=f"File vượt quá giới hạn {max_size//1024//1024}MB")
+                out_f.write(chunk)
+        if written == 0:
+            raise HTTPException(status_code=400, detail="File rỗng")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Lỗi ghi file: {e}")
+    finally:
+        try:
+            await file.close()
+        except Exception:
+            pass
+
+    # Xử lý chunk + embed trong threadpool (không chặn event loop)
+    def _process_and_index():
+        from backend.preprocessing.pipeline import process_file_to_chunks
+        from backend.indexing.embedder import embed as _embed
+        from backend.indexing.vectorstore import add_chunks as _add
+        # 1. Chunk
+        chunks = process_file_to_chunks(target_path, session_id=session_id, filename_override=safe_name)
+        if not chunks:
+            raise RuntimeError("Không trích được nội dung từ file (file rỗng hoặc không đọc được)")
+        # 2. Embed
+        texts = [c["text"] for c in chunks]
+        # Batch embedding
+        embs = _embed(texts)
+        items = []
+        for c, emb in zip(chunks, embs):
+            # metadata: giữ session_id để cô lập
+            meta = {
+                "category": c.get("category", "uploaded"),
+                "subcategory": c.get("subcategory", ""),
+                "filename": c.get("filename", safe_name),
+                "source": c.get("source", str(target_path)),
+                "page": c.get("page", 0),
+                "chunk_index": c.get("chunk_index", 0),
+                "chunk_mode": c.get("chunk_mode", "uploaded"),
+                "chunk_type": c.get("chunk_type", "text"),
+                "block_type": c.get("block_type", "text"),
+                "session_id": session_id,
+                "text_length": len(c.get("text", "")),
+            }
+            # thêm extra nếu có
+            if c.get("has_table"):
+                meta["has_table"] = True
+            if c.get("has_image"):
+                meta["has_image"] = True
+            items.append({"id": c["id"], "text": c["text"], "embedding": emb, "metadata": meta})
+        _add(items)
+        return chunks, len(texts)
+
+    try:
+        chunks, n_chunks = await run_in_threadpool(_process_and_index)
+    except Exception as e:
+        # cleanup file nếu lỗi index
+        try:
+            target_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        import traceback as _tb
+        _tb.print_exc()
+        raise HTTPException(status_code=500, detail=f"Lỗi xử lý file: {e}")
+
+    # Lấy text raw để phát hiện ý định (tối đa 8000 chars)
+    file_text = ""
+    try:
+        # ghép từ chunks
+        file_text = "\n".join(c.get("text","") for c in chunks[:10])[:8000]
+        if not file_text and target_path.suffix.lower() in (".txt", ".md"):
+            file_text = target_path.read_text(encoding="utf-8", errors="ignore")[:8000]
+    except Exception:
+        file_text = ""
+
+    # Tự động xử lý: nếu file có yêu cầu rõ ràng -> trả lời ngay, không thì hỏi lại
+    auto_message = None
+    auto_sources = []
+    is_auto = False
+    try:
+        if getattr(cfg, "UPLOAD_AUTO_ANSWER", True) and file_text:
+            from backend.generation.generator import detect_file_intent, auto_answer_file
+            intent = await run_in_threadpool(lambda: detect_file_intent(file_text))
+            has_req = intent.get("has_request", False)
+            extracted = intent.get("extracted_query", "") or ""
+            if has_req and extracted:
+                # tự trả lời
+                ans = await run_in_threadpool(lambda: auto_answer_file(chunks, file_text, extracted, style=None))
+                # validate
+                try:
+                    ans = validate_output(ans, max_len=4000)
+                except Exception:
+                    ans = ans[:4000]
+                auto_message = ans
+                auto_sources = [{"filename": safe_name, "page": c.get("page", 0), "category": "uploaded"} for c in chunks[:3]]
+                is_auto = True
+                # Lưu vào lịch sử phiên để lần sau chat có ngữ cảnh
+                _append_to_session(session_id, f"[Đã tải file: {safe_name}]", ans)
+            else:
+                # hỏi lại
+                ask = getattr(cfg, "UPLOAD_AUTO_ASKBACK", "Bạn muốn làm gì với file này?")
+                pages = len(set(c.get("page", 0) for c in chunks))
+                ask_filled = ask.format(filename=safe_name, pages=pages or 1, chunks=n_chunks)
+                auto_message = ask_filled
+                auto_sources = []
+                is_auto = False
+                _append_to_session(session_id, f"[Đã tải file: {safe_name}]", ask_filled)
+        else:
+            ask = getattr(cfg, "UPLOAD_AUTO_ASKBACK", "Bạn muốn làm gì với file này?")
+            pages = len(set(c.get("page", 0) for c in chunks))
+            auto_message = ask.format(filename=safe_name, pages=pages or 1, chunks=n_chunks)
+            _append_to_session(session_id, f"[Đã tải file: {safe_name}]", auto_message)
+    except Exception as e:
+        print(f"[upload] auto intent lỗi: {e}")
+        # fallback ask
+        try:
+            ask = getattr(cfg, "UPLOAD_AUTO_ASKBACK", "Bạn muốn làm gì với file này?")
+            auto_message = ask.format(filename=safe_name, pages=1, chunks=n_chunks)
+            _append_to_session(session_id, f"[Đã tải file: {safe_name}]", auto_message)
+        except Exception:
+            pass
+
+    # Xác định số trang
+    pages = len(set(c.get("page", 0) for c in chunks))
+    return {
+        "session_id": session_id,
+        "filename": safe_name,
+        "size": written,
+        "pages": pages,
+        "chunks": n_chunks,
+        "auto_message": auto_message,
+        "is_auto_answered": is_auto,
+        "sources": auto_sources,
+    }
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest, request: Request):
@@ -695,6 +998,7 @@ async def chat(req: ChatRequest, request: Request):
                     use_rerank=req.use_rerank,
                     style=effective_style,
                     last_math_result=last_math_result,
+                    session_id=session_id,
                 )
             )
             # Output validation: kiểm tra kết quả AI trước khi đưa vào hệ thống
@@ -824,6 +1128,7 @@ async def chat(req: ChatRequest, request: Request):
                     use_rerank=req.use_rerank,
                     style=effective_style,
                     last_math_result=last_math_result if 'last_math_result' in locals() else None,
+                    session_id=session_id,
                 )
             )
             # Output validation cho nhánh đơn lượt
@@ -1047,7 +1352,7 @@ async def chat_stream(req: ChatRequest, request: Request):
                     except Exception:
                         pass
                 fetch_k = (req.top_k or RETRIEVE_TOP_K) * 3 if req.use_rerank else (req.top_k or RETRIEVE_TOP_K)
-                ctx = await run_in_threadpool(lambda: retrieve(standalone_q, category=req.category, top_k=fetch_k))
+                ctx = await run_in_threadpool(lambda: retrieve(standalone_q, category=req.category, top_k=fetch_k, session_id=session_id))
                 if req.use_rerank and ctx:
                     ctx = await run_in_threadpool(lambda: rerank(standalone_q, ctx, top_k=req.top_k or RETRIEVE_TOP_K))
                 # Build messages
