@@ -440,6 +440,11 @@ _MATH_OP_WORDS = [
 ]
 _MATH_SYMBOLS_RE = re.compile(r"[0-9]+(?:[.,][0-9]+)?\s*[\+\-\*/%\^×÷·•∶:²³]+\s*[0-9]+")
 _MATH_SYMBOL_CHARS = set("+-*/%^()")
+_NON_MATH_CONTEXT_HINTS = [
+    "quy định", "quy chế", "quyết định", "sinh viên", "giờ học",
+    "giờ thực tập", "nghỉ học", "đến muộn", "đi muộn", "không phép",
+    "học tập", "kỷ luật", "vi phạm",
+]
 
 _STEPS_KEYWORDS = ["chi tiết", "chi tiet", "từng bước", "tung buoc", "các bước", "cac buoc", "bước", "buoc", "giải thích", "giai thich", "cách làm", "cach lam", "step by step", "show steps", "hiển thị bước", "hien thi buoc"]
 
@@ -447,6 +452,13 @@ def is_math_question(question: str, history=None, last_result=None) -> bool:
     if not question or not question.strip():
         return False
     q_low = question.strip().lower()
+    # Không để câu hỏi nghiệp vụ bị bắt nhầm bởi từ khóa toán hoặc metadata
+    # như "top_k:3"; chỉ bỏ qua hàng rào này khi có biểu thức toán rõ ràng.
+    has_explicit_expression = bool(_MATH_SYMBOLS_RE.search(q_low)) or bool(
+        re.search(r"\d\s*[\+\-\*/%\^×÷·•∶:]\s*\d", q_low)
+    )
+    if any(hint in q_low for hint in _NON_MATH_CONTEXT_HINTS) and not has_explicit_expression:
+        return False
     # quick: contains math op words
     for w in _MATH_OP_WORDS:
         if w in q_low:
@@ -472,7 +484,7 @@ def is_math_question(question: str, history=None, last_result=None) -> bool:
     if _MATH_SYMBOLS_RE.search(q_low):
         return True
     # check for Unicode math symbols like × ÷ √ · • ∶ : ²³ and factorial ! with digits
-    if any(sym in q_low for sym in ["×", "÷", "√", "·", "•", "∶", ":", "²", "³", "％", "！"]) and any(ch.isdigit() for ch in q_low):
+    if any(sym in q_low for sym in ["×", "÷", "√", "·", "•", "∶", "²", "³", "％", "！"]) and any(ch.isdigit() for ch in q_low):
         return True
     if re.search(r"\d\s*!\s*($|[^\d])", q_low):
         return True

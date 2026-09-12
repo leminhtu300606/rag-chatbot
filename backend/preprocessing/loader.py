@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pymupdf as fitz
 from docx import Document
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 
 from backend.config import DATA_DIR
 
@@ -73,42 +75,42 @@ def _should_use_blocks() -> bool:
 def load_docx(path: Path) -> list[dict]:
     doc = Document(str(path))
     parts = []
-    # Đoạn văn theo thứ tự xuất hiện (paragraphs đã giữ order)
-    for p in doc.paragraphs:
-        if p.text.strip():
-            parts.append(p.text.strip())
-    # Bảng có cấu trúc: lưu cả dạng pipe và structured
-    tables_data = []
-    for ti, table in enumerate(doc.tables):
-        headers = []
-        rows = []
-        # Lấy dòng đầu làm headers nếu có style header, nếu không thì dòng đầu
-        for ri, row in enumerate(table.rows):
-            cells = [c.text.strip() for c in row.cells]
-            if not any(cells):
-                continue
-            if ri == 0:
-                headers = cells
-                # Lưu dòng header cũng như row
-                rows.append(cells)
-                parts.append(" | ".join(c for c in cells if c))
-            else:
-                rows.append(cells)
-                parts.append(" | ".join(c for c in cells if c))
-        if headers or rows:
-            tables_data.append({
-                "table_index": ti,
-                "headers": headers,
-                "rows": rows,
-                "bbox": None,
-                "page": 0,
-            })
-    text = "\n".join(parts)
-    rec = {"text": text, "page": 0, "kind": "docx", "block_type": "text"}
-    if tables_data:
-        rec["tables"] = tables_data
-        rec["has_table"] = True
-    return [rec]
+    records = []
+    table_index = 0
+    # Duyệt body XML để giữ thứ tự paragraph/table, nhưng không trộn nội dung bảng vào text.
+    for child in doc.element.body.iterchildren():
+        if child.tag.endswith("}p"):
+            paragraph = Paragraph(child, doc)
+            if paragraph.text.strip():
+                parts.append(paragraph.text.strip())
+        elif child.tag.endswith("}tbl"):
+            table = Table(child, doc)
+            rows = []
+            for row in table.rows:
+                cells = [cell.text.strip() for cell in row.cells]
+                if any(cells):
+                    rows.append(cells)
+            if rows:
+                headers = rows[0]
+                table_text = "\n".join(" | ".join(cell for cell in row if cell) for row in rows)
+                records.append({
+                    "text": table_text,
+                    "page": 0,
+                    "kind": "docx_table",
+                    "block_type": "table",
+                    "table_data": {
+                        "table_index": table_index,
+                        "headers": headers,
+                        "rows": rows,
+                        "bbox": None,
+                        "page": 0,
+                    },
+                    "has_table": True,
+                })
+                table_index += 1
+    if parts:
+        records.insert(0, {"text": "\n".join(parts), "page": 0, "kind": "docx", "block_type": "text"})
+    return records
 
 
 # ── PDF helpers: blocks + tables + images ──
@@ -252,6 +254,15 @@ def _pdf_extract_images(page: fitz.Page, doc) -> list[dict]:
     return images
 
 
+def _infer_visual_type(page_text: str) -> str:
+    low = (page_text or "").lower()
+    if any(term in low for term in ("biểu đồ", "bieu do", "chart", "graph", "sơ đồ", "so do")):
+        return "chart_or_diagram"
+    if any(term in low for term in ("hình", "ảnh", "figure", "minh họa", "minh hoa")):
+        return "illustration"
+    return "image"
+
+
 def _pdf_page_text(page: fitz.Page) -> str:
     if _should_use_blocks():
         txt = _pdf_page_blocks_sorted(page)
@@ -310,14 +321,13 @@ def load_pdf(path: Path) -> list[dict]:
     for i, page in enumerate(doc):
         text = _pdf_page_text(page)
         is_scanned = False
-        if len(text) < PDF_TEXT_MIN:
+        ocr_disabled = os.getenv("DISABLE_OCR", "").strip().lower() in ("1", "true", "yes", "on")
+        if len(text) < PDF_TEXT_MIN and not ocr_disabled:
             try:
                 text = _pdf_page_ocr(page)
                 is_scanned = True
             except Exception as e:
                 print(f"[loader] OCR lỗi trang {i+1} của {path.name}: {e}")
-        if not text:
-            continue
         # Trích bảng và hình - chỉ cho trang không phải scan để tiết kiệm CPU (scan đã là ảnh)
         tables = []
         images = []
@@ -328,6 +338,8 @@ def load_pdf(path: Path) -> list[dict]:
                 images = _pdf_extract_images(page, doc)
             except Exception:
                 images = []
+        if not text and not tables and not images:
+            continue
         # Tạo record chính
         main_rec = {
             "text": text,
@@ -337,19 +349,11 @@ def load_pdf(path: Path) -> list[dict]:
             "bbox": None,
         }
         if tables:
-            # Thêm text bảng vào main text để retriever vẫn tìm được nếu không có structured chunk
-            table_texts = "\n".join(t["text"] for t in tables if t.get("text"))
-            if table_texts and table_texts not in text:
-                main_rec["text"] = text + "\n\n[BẢNG]\n" + table_texts
             main_rec["tables"] = tables
             main_rec["has_table"] = True
         if images:
             main_rec["images"] = images
             main_rec["has_image"] = True
-            # Thêm placeholder caption nếu chưa có text mô tả
-            # Không làm phình text, chỉ thêm marker để chunker biết có figure
-            if len(images) <= 3:  # tránh spam khi scan full page image
-                main_rec["text"] += f"\n[Có {len(images)} hình ảnh minh họa trang {i+1}]"
         pages.append(main_rec)
         # Nếu có bảng và enable_table_struct, tạo thêm record riêng cho mỗi bảng để chunker tách riêng
         if enable_table and tables:
@@ -367,20 +371,21 @@ def load_pdf(path: Path) -> list[dict]:
                     })
         # Hình riêng: nếu có ít hình và không phải scan full page, tạo record figure
         # Cho phép tới 5 hình để bắt cả trường hợp thong_bao có 3 hình (đồng hồ + logo)
-        if images and not is_scanned and len(images) <= 5:
-            for im in images[:2]:  # lấy tối đa 2 hình tiêu biểu để tránh spam
+        if images and not is_scanned and len(images) <= 8:
+            visual_type = _infer_visual_type(text)
+            for im in images:
                 # Bỏ qua hình quá nhỏ (logo header) hoặc quá lớn (full page scan)
                 if im.get("width", 0) < 100 or im.get("height", 0) < 100:
                     continue
                 if im.get("width", 0) > 1600 and im.get("height", 0) > 2300:
                     continue  # full page scan
                 pages.append({
-                    "text": f"Hình minh họa trang {i+1} (bbox {im.get('bbox')})",
+                    "text": f"{visual_type} trang {i+1}. Caption/ngữ cảnh gần ảnh: {text[:500]}",
                     "page": i + 1,
                     "kind": "pdf_figure",
                     "block_type": "figure",
                     "bbox": im.get("bbox"),
-                    "image_info": im,
+                    "image_info": {**im, "visual_type": visual_type},
                 })
     doc.close()
     return pages

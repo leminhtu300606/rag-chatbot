@@ -1403,7 +1403,22 @@ async def trigger_clean():
 # Mount frontend static files if exists (phuc vu giao dien)
 frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
 if frontend_dir.exists():
-    # Serve frontend tai / (index.html, style.css, app.js) - API routes uu tien hon
+    # Luon doc index.html hien tai va khong de trinh duyet giu giao dien cu.
+    @app.get("/", include_in_schema=False)
+    async def frontend_index():
+        return FileResponse(
+            frontend_dir / "index.html",
+            headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"},
+        )
+
+    @app.middleware("http")
+    async def disable_frontend_cache(request: Request, call_next):
+        response = await call_next(request)
+        if not request.url.path.startswith("/api/") and request.url.path not in {"/docs", "/openapi.json", "/redoc"}:
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return response
+
+    # API routes uu tien hon static files; tai nguyen frontend cung khong bi cache cu.
     app.mount("/", StaticFiles(directory=str(frontend_dir), html=True), name="frontend")
 
 

@@ -14,8 +14,6 @@ Reranker da chuyen han sang backend/generation/reranker.py (generation lo cham d
 
 from .embedder import embed
 from .vectorstore import get_client, get_collection, add_chunks, count, reset_collection, peek, get_stats
-from .retriever import retrieve
-from backend.generation.reranker import rerank, RERANK_MODEL
 
 __all__ = [
     "embed",
@@ -26,8 +24,16 @@ __all__ = [
     "reset_collection",
     "peek",
     "get_stats",
-    "retrieve",
-    "rerank",
-    "RERANK_MODEL",
+    "retrieve", "rerank", "RERANK_MODEL",
 ]
+
+
+def __getattr__(name):
+    if name == "retrieve":
+        from .retriever import retrieve
+        return retrieve
+    if name in ("rerank", "RERANK_MODEL"):
+        from backend.generation.reranker import RERANK_MODEL, rerank
+        return rerank if name == "rerank" else RERANK_MODEL
+    raise AttributeError(name)
 

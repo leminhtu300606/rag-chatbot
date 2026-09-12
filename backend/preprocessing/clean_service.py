@@ -27,8 +27,6 @@ import backend.config as cfg
 from backend.preprocessing.loader import load_file
 from backend.preprocessing.cleaner import clean_text
 from backend.preprocessing.chunker import contextual_chunk, semantic_chunk, _effective_min_chars
-# Import embed sau khi da tat warning
-from backend.indexing.embedder import embed
 
 
 def _show_clean_sample(raw_text: str, cleaned: str, preview: int = 600):
@@ -63,11 +61,6 @@ def clean_single_file(path: Path, dry_run: bool = False, show_sample: bool = Fal
         category, subcategory = "unknown", ""
     filename = path.name
 
-    use_contextual = cfg.CHUNK.get("contextual", True)
-    chunk_fn = contextual_chunk if use_contextual else semantic_chunk
-
-    cleaned_chunks = []
-
     for rec in records:
         raw = rec.get("text", "")
         cleaned = clean_text(raw)
@@ -78,34 +71,14 @@ def clean_single_file(path: Path, dry_run: bool = False, show_sample: bool = Fal
         if not cleaned:
             continue
 
-        meta_for_chunk = {
-            "filename": filename,
-            "category": rec.get("category", category),
-            "subcategory": rec.get("subcategory", subcategory),
-            "source": str(path),
-            "page": rec.get("page", 0),
-        }
-        if use_contextual:
-            pieces = chunk_fn(cleaned, embed, metadata=meta_for_chunk)
-        else:
-            pieces = chunk_fn(cleaned, embed)
+        rec["text"] = cleaned
 
-        for i, piece in enumerate(pieces):
-            # Đồng bộ với ngưỡng hiệu dụng của chunker (max(min_chars, 20), kẹp theo max_chars)
-            _eff_min = _effective_min_chars(None)
-            if len(piece.strip()) < _eff_min:
-                continue
-            cleaned_chunks.append({
-                "id": f"{filename}-{rec.get('page',0)}-{i}",
-                "text": piece,
-                "category": meta_for_chunk["category"],
-                "subcategory": meta_for_chunk["subcategory"],
-                "filename": filename,
-                "source": str(path),
-                "page": meta_for_chunk["page"],
-                "chunk_index": i,
-                "chunk_mode": "contextual" if use_contextual else "semantic",
-            })
+    # Dùng cùng builder với pipeline chính để không làm mất bảng/ảnh khi chạy clean.py.
+    from backend.preprocessing.pipeline import _build_chunks_from_records
+    use_contextual = cfg.CHUNK.get("contextual", True)
+    cleaned_chunks = _build_chunks_from_records(
+        records, filename, category, subcategory, str(path)
+    )
 
     if dry_run:
         print(f"[dry-run] {path.name}: {len(records)} pages -> {len(cleaned_chunks)} chunks (khong ghi file)")

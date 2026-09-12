@@ -67,6 +67,9 @@ function isSocialFrontend(q){
 function isMathFrontend(q){
   if(!q) return false;
   const low = q.toLowerCase();
+  const nonMathContext = ["quy định","quy chế","quyết định","sinh viên","giờ học","giờ thực tập","nghỉ học","đến muộn","đi muộn","không phép","học tập","kỷ luật","vi phạm"];
+  const explicitExpression = /\d\s*(>=|<=|==|!=|>|<|=|[+\-*\/%×÷^])\s*\d/.test(low);
+  if(nonMathContext.some(term => low.includes(term)) && !explicitExpression) return false;
   // So sánh số thực: lớn hơn/nhỏ hơn/bằng/so sánh + số
   const cmpWords = ["lớn hơn","lon hon","nhỏ hơn","nho hon","bé hơn","be hon","bằng nhau","bang nhau","bằng","bang","không bằng","khong bang","khác","khac","so sánh","so sanh","so với","so voi"];
   for(const w of cmpWords) if(low.includes(w) && /\d/.test(low)) return true;

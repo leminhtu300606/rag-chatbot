@@ -23,7 +23,12 @@ except Exception:
 from backend.preprocessing.loader import load_file
 from backend.preprocessing.cleaner import clean_text
 from backend.preprocessing.chunker import contextual_chunk, semantic_chunk, _effective_min_chars
-from backend.indexing.embedder import embed
+
+
+def _embed_for_chunk(texts):
+    """Nạp embedding model chỉ khi semantic chunk thực sự cần dùng."""
+    from backend.indexing.embedder import embed
+    return embed(texts)
 
 
 def _out_path(source: Path) -> Path:
@@ -60,7 +65,9 @@ def _build_chunks_from_records(records: list[dict], filename: str, category: str
         else:
             chunk_type = "text"
         if chunk_type == "table" and cfg.CHUNK.get("enable_table_struct", True):
-            table_data = rec.get("table_data") or rec.get("tables", [None])[0] if isinstance(rec.get("tables"), list) else None
+            table_data = rec.get("table_data")
+            if not table_data and isinstance(rec.get("tables"), list) and rec.get("tables"):
+                table_data = rec["tables"][0]
             raw_text = rec.get("text", "")
             if table_data and isinstance(table_data, dict) and table_data.get("rows"):
                 headers = table_data.get("headers") or []
@@ -84,7 +91,7 @@ def _build_chunks_from_records(records: list[dict], filename: str, category: str
             text = _clean(raw_text) if block_type != "table" else raw_text.strip()
             if not text:
                 continue
-            max_c = cfg.CHUNK.get("max_chars", 1200)
+            max_c = cfg.CHUNK.get("table_max_chars", cfg.CHUNK.get("max_chars", 1200))
             if len(text) > max_c:
                 lines = text.splitlines()
                 cur = ""
@@ -102,7 +109,7 @@ def _build_chunks_from_records(records: list[dict], filename: str, category: str
                 pieces = [text]
             for i, piece in enumerate(pieces):
                 _eff_min = _eff(None)
-                if len(piece.strip()) < _eff_min and len(piece.strip()) < 20:
+                if len(piece.strip()) < cfg.CHUNK.get("table_min_chars", 30):
                     continue
                 chunk_id_base = f"{session_id}-{filename}" if session_id else filename
                 out_chunks.append({
@@ -119,6 +126,7 @@ def _build_chunks_from_records(records: list[dict], filename: str, category: str
                     "block_type": block_type,
                     "parent_context": parent_text_by_page.get(rec.get("page"), "")[:200],
                     "bbox": rec.get("bbox"),
+                    "table_data": table_data,
                     "has_table": True,
                     "session_id": session_id,
                 })
@@ -130,8 +138,11 @@ def _build_chunks_from_records(records: list[dict], filename: str, category: str
                 if parent_ctx:
                     raw_text = f"[Bối cảnh trang {rec.get('page')}]\n{parent_ctx}\n\n[HÌNH ẢNH - {rec.get('filename')} trang {rec.get('page')} bbox {rec.get('bbox')}]\n{raw_text}"
             text = raw_text.strip()
-            if not text or len(text) < 20:
+            if not text or len(text) < cfg.CHUNK.get("figure_min_chars", 30):
                 continue
+            figure_max = cfg.CHUNK.get("figure_max_chars", 900)
+            if len(text) > figure_max:
+                text = text[:figure_max].rstrip()
             chunk_id_base = f"{session_id}-{filename}" if session_id else filename
             out_chunks.append({
                 "id": f"{chunk_id_base}-{rec['page']}-figure-{len(out_chunks)}",
@@ -148,6 +159,7 @@ def _build_chunks_from_records(records: list[dict], filename: str, category: str
                 "parent_context": parent_text_by_page.get(rec.get("page"), "")[:200],
                 "bbox": rec.get("bbox"),
                 "has_image": True,
+                "image_info": rec.get("image_info"),
                 "session_id": session_id,
             })
             continue
@@ -162,9 +174,9 @@ def _build_chunks_from_records(records: list[dict], filename: str, category: str
             "page": rec["page"],
         }
         if use_contextual:
-            pieces = chunk_fn(text, embed, metadata=meta_for_chunk)
+            pieces = chunk_fn(text, _embed_for_chunk, metadata=meta_for_chunk)
         else:
-            pieces = chunk_fn(text, embed)
+            pieces = chunk_fn(text, _embed_for_chunk)
         for i, piece in enumerate(pieces):
             _eff_min = _eff(None)
             if len(piece.strip()) < _eff_min:

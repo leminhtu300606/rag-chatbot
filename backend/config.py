@@ -50,6 +50,12 @@ CHUNK = {
     "enable_image_save": False,  # True = lưu ảnh crop ra disk (tốn dung lượng)
     "enable_parent_child": True,  # True = lưu parent context cho table/figure
     "parent_chars": 600,  # số ký tự parent lấy quanh child
+    # ── Kích thước riêng cho multimodal ──
+    "table_max_chars": 1800,  # giữ nhiều dòng bảng hơn text thường
+    "table_min_chars": 30,
+    "figure_max_chars": 900,  # caption + parent vừa đủ cho truy hồi
+    "figure_min_chars": 30,
+    "text_overlap_sentences": 1,  # overlap chỉ áp dụng cho text cùng section
     # ── CPU-friendly semantic ──
     "use_semantic": True,  # True = dùng embedding semantic khi text ngắn, False = luôn fast
     "semantic_max_chars": 3000,  # text dài hơn ngưỡng này thì dùng fast_chunk

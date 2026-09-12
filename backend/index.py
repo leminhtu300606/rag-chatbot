@@ -86,9 +86,6 @@ def build(rebuild: bool = False) -> None:
                  False = chỉ embed chunk của file mới/sửa (so mtime với manifest).
     """
     manifest = {} if rebuild else _load_manifest()
-    if rebuild:
-        print("[build] --rebuild: xóa collection cũ...")
-        reset_collection()
 
     seen = {}
     to_embed = []
@@ -128,6 +125,12 @@ def build(rebuild: bool = False) -> None:
     except Exception:
         batch = 32
     embeddings = embed(texts, batch_size=batch)
+
+    # Chỉ thay collection sau khi embed thành công, tránh --rebuild làm mất index cũ
+    # khi model hoặc phần cứng embedding gặp lỗi giữa chừng.
+    if rebuild:
+        print("[build] --rebuild: xóa collection cũ...")
+        reset_collection()
 
     emb_dim = len(embeddings[0]) if len(embeddings) > 0 else 0
     print(f"  Embedding model: {cfg.EMBED_MODEL} | dim={emb_dim} | total={len(embeddings)}")

@@ -3,161 +3,47 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>ChatGPT — RAG Chatbot Học viện Kỹ thuật Mật mã</title>
-  <link rel="stylesheet" href="style.css?v=20250918" />
+  <title>Học viện | Trợ lý tài liệu</title>
+  <link rel="stylesheet" href="style.css?v=20260912" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
-  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
 </head>
 <body>
-  <div class="app">
-    <!-- Sidebar - ChatGPT style -->
+  <div class="app-shell">
     <aside class="sidebar" id="sidebar">
-      <div class="sidebar-top">
-        <button class="new-chat" id="new-chat">
-          <span class="plus">+</span> New chat
-          <i class="fa-regular fa-pen-to-square"></i>
-        </button>
-        <button class="sidebar-toggle" id="close-sidebar"><i class="fa-solid fa-chevron-left"></i></button>
+      <div class="sidebar-header">
+        <a class="brand" href="/" aria-label="Trang chủ"><span class="brand-mark"><i class="fa-solid fa-sparkles"></i></span><span><strong>Học viện</strong><small>Trợ lý tài liệu</small></span></a>
+        <button class="icon-btn sidebar-toggle" id="close-sidebar" title="Đóng thanh bên"><i class="fa-solid fa-xmark"></i></button>
       </div>
-
-      <div class="history">
-        <div class="history-title">Lịch sử</div>
-        <div id="history-list" class="history-list">
-          <div class="history-item active">
-            <i class="fa-regular fa-message"></i>
-            <span>Cuộc trò chuyện mới</span>
-          </div>
-          <div class="history-item">
-            <i class="fa-regular fa-message"></i>
-            <span>Quy chế đào tạo là gì?</span>
-          </div>
-          <div class="history-item">
-            <i class="fa-regular fa-message"></i>
-            <span>Quy định khảo thí</span>
-          </div>
-        </div>
-      </div>
-
-      <div class="sidebar-bottom">
-        <div class="sidebar-card" style="padding:10px">
-          <div class="status-line">
-            <span id="health-badge" class="dot warn"></span>
-            <span id="health-text" class="hint">checking...</span>
-          </div>
-          <div class="status-line">
-            <span id="history-badge" class="hint">💬 0 lượt • hội thoại mới</span>
-          </div>
-          <div id="session-info" class="hint" style="font-size:11px;word-break:break-all;margin-top:4px"></div>
-        </div>
-
-        <div class="user">
-          <div class="avatar-user">HV</div>
-          <div>
-            <div class="user-name">Học viên KTMM</div>
-            <div class="hint" id="llm-info">qwen2.5 • Ollama • vietnamese-embedding</div>
-          </div>
-          <button class="icon-btn" id="stats-btn" title="Thống kê"><i class="fa-solid fa-ellipsis"></i></button>
-        </div>
+      <button class="new-chat" id="new-chat"><i class="fa-solid fa-plus"></i><span>Cuộc trò chuyện mới</span><kbd>Ctrl K</kbd></button>
+      <div class="sidebar-label">Các cuộc trò chuyện</div>
+      <nav id="history-list" class="history-list" aria-label="Lịch sử hội thoại"></nav>
+      <div class="sidebar-footer">
+        <div class="system-status"><span id="health-badge" class="dot warn"></span><div><strong id="health-text">Đang kiểm tra hệ thống</strong><span id="history-badge">0 lượt • phiên mới</span></div></div>
+        <div class="account-row"><span class="account-avatar">HV</span><span class="account-copy"><strong>Học viên KTMM</strong><small id="llm-info">Đang kết nối mô hình</small></span><button class="icon-btn" id="stats-btn" title="Thống kê hệ thống"><i class="fa-solid fa-ellipsis"></i></button></div>
+        <div id="session-info" class="session-info"></div>
       </div>
     </aside>
-
-    <!-- Main - ChatGPT style -->
-    <main class="main">
-      <!-- Top bar - ChatGPT model selector -->
-      <header class="topbar">
-        <button class="icon-btn mobile" id="open-sidebar"><i class="fa-solid fa-bars"></i></button>
-        <div class="model-selector">
-          <button class="model active">RAG Chatbot <span>v1 • Học viện Kỹ thuật Mật mã</span></button>
-          <button class="model ghost"><i class="fa-solid fa-lock"></i> Quy chế • Quy định • Thông báo</button>
-        </div>
-        <div class="top-actions">
-          <a href="/docs" target="_blank" class="icon-btn" title="API Docs"><i class="fa-solid fa-code"></i></a>
-          <a href="/api/health" target="_blank" class="icon-btn" title="Health"><i class="fa-solid fa-heart-pulse"></i></a>
-        </div>
-      </header>
-
-      <!-- Messages - centered ChatGPT width -->
-      <div class="chat-wrap">
+    <main class="main-panel">
+      <header class="topbar"><div class="topbar-left"><button class="icon-btn mobile" id="open-sidebar" title="Mở thanh bên"><i class="fa-solid fa-bars"></i></button><div class="workspace-title"><span class="eyebrow">Không gian hỏi đáp</span><strong>Trợ lý học viện</strong></div></div><div class="topbar-actions"><span class="secure-label"><i class="fa-solid fa-shield-halved"></i> Dữ liệu nội bộ</span><a class="icon-btn" href="/docs" target="_blank" title="API Docs"><i class="fa-solid fa-code"></i></a><a class="icon-btn" href="/api/health" target="_blank" title="Trạng thái hệ thống"><i class="fa-solid fa-heart-pulse"></i></a></div></header>
+      <section class="chat-stage">
         <div id="messages" class="messages">
-          <!-- Welcome - ChatGPT centered -->
-          <div class="welcome" id="welcome">
-            <div class="welcome-icon">🎓</div>
-            <h1>RAG Chatbot</h1>
-            <p>Hỏi đáp trên kho tài liệu nội bộ Học viện Kỹ thuật Mật mã<br>
-              <span>Chỉ trả lời dựa trên ngữ cảnh được cung cấp • Ghi rõ nguồn</span></p>
-            <div class="examples">
-              <button class="example" data-q="Quy chế đào tạo là gì?">
-                <i class="fa-regular fa-lightbulb"></i>
-                <b>Quy chế đào tạo</b><span>Quy chế đào tạo là gì?</span>
-              </button>
-              <button class="example" data-q="Quy định khảo thí như thế nào?">
-                <i class="fa-solid fa-graduation-cap"></i>
-                <b>Quy định khảo thí</b><span>Quy định về khảo thí?</span>
-              </button>
-              <button class="example" data-q="Học bổng KKHT xét thế nào?">
-                <i class="fa-solid fa-award"></i>
-                <b>Học bổng</b><span>Học bổng KKHT xét thế nào?</span>
-              </button>
-              <button class="example" data-q="Điều kiện tốt nghiệp?">
-                <i class="fa-solid fa-scroll"></i>
-                <b>Tốt nghiệp</b><span>Điều kiện tốt nghiệp?</span>
-              </button>
-            </div>
-            <div class="quick-hint">Gõ <code>quy_che: câu hỏi</code> để lọc danh mục • Dữ liệu từ <code>data/classified</code> → <code>chroma_db</code></div>
-          </div>
+          <div class="welcome" id="welcome"><div class="welcome-kicker"><span class="pulse-dot"></span> Sẵn sàng hỗ trợ</div><h1>Hôm nay bạn muốn<br><em>tìm hiểu điều gì?</em></h1><p>Tra cứu quy chế, quy định và thông báo của Học viện bằng ngôn ngữ tự nhiên.</p><div class="examples">
+            <button class="example" data-q="Quy chế đào tạo là gì?"><span class="example-icon mint"><i class="fa-solid fa-book-open"></i></span><span><b>Quy chế đào tạo</b><small>Điều kiện, quy trình và quyền lợi</small></span><i class="fa-solid fa-arrow-up-right"></i></button>
+            <button class="example" data-q="Quy định khảo thí như thế nào?"><span class="example-icon blue"><i class="fa-solid fa-clipboard-check"></i></span><span><b>Quy định khảo thí</b><small>Thi, kiểm tra và phúc khảo</small></span><i class="fa-solid fa-arrow-up-right"></i></button>
+            <button class="example" data-q="Học bổng KKHT xét thế nào?"><span class="example-icon gold"><i class="fa-solid fa-award"></i></span><span><b>Học bổng</b><small>Tiêu chí xét học bổng KKHT</small></span><i class="fa-solid fa-arrow-up-right"></i></button>
+            <button class="example" data-q="Điều kiện tốt nghiệp?"><span class="example-icon coral"><i class="fa-solid fa-graduation-cap"></i></span><span><b>Tốt nghiệp</b><small>Điều kiện và hồ sơ cần chuẩn bị</small></span><i class="fa-solid fa-arrow-up-right"></i></button>
+          </div><div class="welcome-note"><i class="fa-solid fa-circle-info"></i> Câu trả lời được tạo từ tài liệu đã lập chỉ mục và luôn kèm nguồn tham khảo.</div></div>
         </div>
-
-        <!-- Uploads bar (per-session, ephemeral) -->
-        <div id="uploads-bar" class="uploads-bar hidden">
-          <div class="uploads-head"><i class="fa-solid fa-paperclip"></i> File trong phiên <span id="uploads-count" class="hint"></span> <button id="uploads-clear" class="hint" style="margin-left:auto;background:none;border:none;color:var(--muted);cursor:pointer;font-size:11px">Xóa tất cả</button></div>
-          <div id="uploads-list" class="uploads-list"></div>
-        </div>
-        <!-- Composer - ChatGPT style -->
-        <div class="composer">
-          <div class="composer-inner">
-            <div class="input-box">
-              <button id="attach-btn" class="attach-btn" title="Đính kèm PDF/DOCX/TXT (tối đa ~100MB)"><i class="fa-solid fa-paperclip"></i></button>
-              <input id="file-input" type="file" accept=".pdf,.docx,.txt,.md,.csv" hidden />
-              <textarea id="input" rows="1" placeholder="Nhắn cho RAG Chatbot..."></textarea>
-              <button id="send" class="send-btn" aria-label="Gửi"><i class="fa-solid fa-arrow-up"></i></button>
-            </div>
-            <div class="composer-foot">
-              <span id="status" class="hint"></span>
-              <span class="hint center">RAG có thể mắc lỗi. Kiểm tra nguồn bên phải.</span>
-              <span class="hint"><span id="model-foot">parquet • chroma • qwen2.5</span></span>
-            </div>
-          </div>
-        </div>
-      </div>
+        <div id="uploads-bar" class="uploads-bar hidden"><div class="uploads-head"><span><i class="fa-solid fa-paperclip"></i> Tài liệu trong phiên</span><span id="uploads-count" class="hint"></span><button id="uploads-clear" title="Xóa tài liệu">Xóa tất cả</button></div><div id="uploads-list" class="uploads-list"></div></div>
+        <div class="composer-area"><div class="composer"><div class="composer-inner"><div class="input-box"><button id="attach-btn" class="attach-btn" title="Đính kèm PDF, DOCX, TXT hoặc MD"><i class="fa-solid fa-paperclip"></i></button><input id="file-input" type="file" accept=".pdf,.docx,.txt,.md,.csv" hidden /><textarea id="input" rows="1" placeholder="Hỏi bất cứ điều gì về tài liệu học viện..."></textarea><button id="send" class="send-btn" aria-label="Gửi câu hỏi"><i class="fa-solid fa-arrow-up"></i></button></div><div class="composer-foot"><span id="status" class="hint"></span><span class="hint center">Enter để gửi · Shift + Enter để xuống dòng</span><span class="hint"><i class="fa-solid fa-wand-magic-sparkles"></i> RAG</span></div></div></div></div>
+      </section>
     </main>
-
-    <!-- Right panel - sources (ChatGPT doesn't have but we keep as drawer) -->
-    <aside class="right" id="right-panel">
-      <div class="right-head">
-        <h3><i class="fa-solid fa-link"></i> Nguồn tham khảo</h3>
-        <button class="icon-btn" id="close-right"><i class="fa-solid fa-xmark"></i></button>
-      </div>
-      <div id="sources" class="sources-list">
-        <p class="hint">Chưa có truy vấn.</p>
-      </div>
-      <div id="rewrite-info" class="hint hidden" style="padding:0 12px 8px;font-size:11px"></div>
-      <div id="summary-info" class="hint hidden" style="padding:0 12px 8px;font-size:11px;border-top:1px dashed rgba(255,255,255,.08);margin-top:8px"></div>
-      <div id="context" class="context-wrap hidden">
-        <h4>Context (rerank top 3)</h4>
-        <div id="context-list"></div>
-      </div>
-    </aside>
+    <aside class="sources-panel" id="right-panel"><div class="panel-header"><div><span class="eyebrow">Tài liệu tham chiếu</span><h2><i class="fa-solid fa-link"></i> Nguồn trả lời</h2></div><button class="icon-btn" id="close-right" title="Đóng nguồn"><i class="fa-solid fa-xmark"></i></button></div><div id="sources" class="sources-list"><div class="empty-panel"><i class="fa-regular fa-file-lines"></i><p>Nguồn tham khảo sẽ xuất hiện ở đây sau mỗi câu hỏi.</p></div></div><div id="rewrite-info" class="hint hidden"></div><div id="summary-info" class="hint hidden"></div><div id="context" class="context-wrap hidden"><h4>Ngữ cảnh đã chọn</h4><div id="context-list"></div></div></aside>
   </div>
-
-  <!-- Stats Modal -->
-  <dialog id="stats-modal">
-    <form method="dialog">
-      <h3>Thống kê hệ thống</h3>
-      <pre id="stats-pre">Đang tải...</pre>
-      <button class="btn">Đóng</button>
-    </form>
-  </dialog>
-
-  <script src="app.js?v=20250918"></script>
+  <dialog id="stats-modal"><form method="dialog"><div class="dialog-title"><span class="example-icon blue"><i class="fa-solid fa-chart-simple"></i></span><h3>Thống kê hệ thống</h3></div><pre id="stats-pre">Đang tải...</pre><button class="btn">Đóng</button></form></dialog>
+  <script src="app.js?v=20260912"></script>
 </body>
 </html>
