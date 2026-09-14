@@ -20,7 +20,7 @@ let isLoading = false;
 
 const TYPEWRITER_SPEED = 12; // giảm từ 18 để hiện nhanh hơn
 let _typingAbort = null;
-const ENABLE_STREAM = true; // bật streaming nếu backend hỗ trợ
+const ENABLE_STREAM = false; // tắt streaming để chỉ hiện kiểu gõ chữ, tránh hiện 2 lần
 
 // ── Multi-session storage (persistent + keep old sessions) ──
 const LS_SESSIONS = "rag_sessions_v2";
@@ -834,7 +834,8 @@ setInterval(()=>{ if(document.visibilityState==="visible" && activeSessionId) fe
 
 async function send(){
   if(isLoading) return;
-  let q=input.value.trim(); if(!q) return;
+  isLoading = true; if(sendBtn) sendBtn.disabled = true;
+  let q=input.value.trim(); if(!q) { isLoading=false; if(sendBtn) sendBtn.disabled=false; return; }
   let category=undefined;
   const m=q.match(/^(\w+):\s*(.+)/); const known=["quyet_dinh","quy_che","quy_dinh","tai_lieu_huong_dan","thong_bao"];
   if(m && known.includes(m[1])){ category=m[1]; q=m[2]; }
@@ -859,7 +860,8 @@ async function send(){
 
   addMsg("user", q, `${category?`#${category} • `:``}rerank:${use_rerank} • top_k:${top_k||3}${use_history && historyToSend ? ` • hist:${historyToSend.length/2|0}`:``}`);
   input.value=""; input.style.height="auto"; input.focus();
-  isLoading=true; if(sendBtn) sendBtn.disabled=true; setStatus(use_history && historyToSend ? "Đang rewrite & truy xuất..." : "Đang truy xuất...");
+  // isLoading đã bật từ đầu hàm để tránh double-send, chỉ cập nhật trạng thái
+  setStatus(use_history && historyToSend ? "Đang rewrite & truy xuất..." : "Đang truy xuất...");
   const placeholder=addMsg("assistant", "⏳ Đang suy nghĩ...");
 
   // Helper streaming parser
@@ -986,10 +988,14 @@ async function send(){
     const rewriteBadge = j.standalone_question && j.standalone_question !== q ? `<span class="tool" title="${escapeHtml(j.standalone_question)}">🔁 đã rewrite</span>` : "";
     const isMath = j.math_result !== undefined && j.math_result !== null;
     const isSocial = j.is_social === true;
+    const needsClarify = j.needs_clarification === true;
     const mathBadge = isMath ? `<span class="tool" title="${escapeHtml(j.math_expression||j.standalone_question||"")} = ${escapeHtml(j.math_result)}">🧮 ${escapeHtml(j.math_expression||j.standalone_question||"")} = ${escapeHtml(j.math_result)}</span>` : "";
-    const sourceBadge = isMath ? `<span class="tool">🧮 calculator • Decimal prec=50</span>` : (isSocial ? `<span class="tool">💬 xã giao • không cần nguồn</span>` : `<span class="tool">✅ ${j.sources.length} nguồn</span>`);
+    const sourceBadge = needsClarify ? `<span class="tool">❓ cần làm rõ • chưa đủ thông tin</span>` : (isMath ? `<span class="tool">🧮 calculator • Decimal prec=50</span>` : (isSocial ? `<span class="tool">💬 xã giao • không cần nguồn</span>` : `<span class="tool">✅ ${j.sources.length} nguồn</span>`));
     bubble.innerHTML=`<span class="answer-text"></span><div class="meta">${sourceBadge}<span class="tool">parquet • rerank top3${histInfo}</span>${mathBadge}${rewriteBadge}</div>`;
-     if(isSocial){
+     if(needsClarify){
+      sourcesEl.innerHTML='<p class="hint">❓ Câu hỏi chưa rõ, hãy bổ sung thêm chi tiết để mình hỗ trợ chính xác hơn.</p>';
+      const rp=$("#right-panel"); if(rp) rp.style.display="flex";
+    } else if(isSocial){
       sourcesEl.innerHTML='<p class="hint">💬 Cuộc trò chuyện xã giao, không cần tài liệu chứng minh.</p>';
       const rp=$("#right-panel"); if(rp) rp.style.display="flex";
     } else if(j.sources && j.sources.length){
@@ -1013,7 +1019,10 @@ async function send(){
       const rp=$("#right-panel"); if(rp) rp.style.display="flex";
     }else sourcesEl.innerHTML='<p class="hint">Không có nguồn.</p>';
 
-    if (j.math_result !== undefined && j.math_result !== null) {
+    if (needsClarify) {
+      rewriteInfo.textContent = `❓ Cần làm rõ: ${j.clarify_reason ? '('+j.clarify_reason+') ' : ''}Vui lòng bổ sung thêm chi tiết.`;
+      rewriteInfo.classList.remove("hidden");
+    } else if (j.math_result !== undefined && j.math_result !== null) {
       rewriteInfo.textContent = `🧮 ${j.math_expression||j.standalone_question} = ${j.math_result} • Decimal prec=50`;
       rewriteInfo.classList.remove("hidden");
     } else if (j.standalone_question && j.standalone_question !== q) {

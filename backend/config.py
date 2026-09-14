@@ -90,7 +90,7 @@ VISION = {
 }
 
 # ── PHẦN 2: Retrieval & Reranking ──
-RETRIEVE_TOP_K = 3
+RETRIEVE_TOP_K = 4
 COLLECTION_NAME = "rag_hvm"
 
 # ── PHẦN 3: Generation ──

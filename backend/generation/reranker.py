@@ -18,8 +18,8 @@ from sentence_transformers import CrossEncoder
 import backend.config as cfg
 from backend.config import DEVICE
 
-# Số kết quả tốt nhất giữ lại sau rerank
-DEFAULT_RERANK_TOP_K = 3
+# Số kết quả tốt nhất giữ lại sau rerank (tăng lên 4 để đủ 1.1-1.4 cho cách 1)
+DEFAULT_RERANK_TOP_K = 4
 RERANK_TOP_K = DEFAULT_RERANK_TOP_K  # bí danh tương thích
 
 _reranker = None
@@ -74,6 +74,24 @@ def rerank(query: str, documents: list[dict], top_k: Optional[int] = None) -> li
     reranked = []
     for doc, score in zip(documents, scores):
         new_doc = doc.copy()
+        # Boost nhỏ cho phủ định "không" để phân biệt "thuộc" vs "không thuộc" (cách 1)
+        try:
+            q_low = query.lower() if isinstance(query, str) else ""
+            t_low = (doc.get("text","") or "").lower()
+            boost = 0.0
+            if "không thuộc" in q_low and "không thuộc" in t_low:
+                boost += 1.5
+            elif "không thuộc" in q_low and "không học" in t_low:
+                boost += 1.2
+            elif "không" in q_low and "không" in t_low:
+                # boost nhẹ cho có "không" chung
+                boost += 0.5
+            # Phạt nhẹ nếu query có "không thuộc" nhưng doc chỉ có "thuộc" không có "không"
+            if "không thuộc" in q_low and "không thuộc" not in t_low and "thuộc chuyên" in t_low:
+                boost -= 0.8
+            score = float(score) + boost
+        except Exception:
+            pass
         new_doc["score"] = float(score)
         reranked.append(new_doc)
 

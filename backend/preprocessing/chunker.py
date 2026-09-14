@@ -368,6 +368,145 @@ def split_by_sections(text: str) -> list[tuple[str, str]]:
     return sections if sections else [("", text.strip())]
 
 
+LEVEL1_RE = re.compile(r"^\s*\d+\.\s+.*", re.MULTILINE)
+LEVEL2_RE = re.compile(r"^\s*\d+\.\d+\.?\s+.*", re.MULTILINE)
+
+def _split_numbered_hierarchical(parent_heading: str, sec_text: str) -> list[tuple[str, str]] | None:
+    """
+    Tách phân cấp cho Điều có dạng:
+      1. Đối với sinh viên không thuộc...
+      1.1. Học viên phải đeo thẻ...
+      1.2. Khi đến trường...
+    Trả về list (combined_heading, chunk_text) hoặc None nếu không có đánh số phân cấp.
+    Mỗi điểm 1.x là một chunk riêng với heading đủ ngữ cảnh.
+    """
+    # Kiểm tra có đánh số không
+    if not LEVEL1_RE.search(sec_text) and not LEVEL2_RE.search(sec_text):
+        return None
+    # Tìm tất cả vị trí Level1
+    l1_matches = list(LEVEL1_RE.finditer(sec_text))
+    if not l1_matches:
+        # Chỉ có Level2 không có Level1 -> tách trực tiếp Level2
+        l2_matches = list(LEVEL2_RE.finditer(sec_text))
+        if not l2_matches:
+            return None
+        # Intro trước L2 đầu tiên
+        chunks: list[tuple[str, str]] = []
+        first_start = l2_matches[0].start()
+        intro = sec_text[:first_start].strip()
+        if intro and len(intro) >= _MIN_FLOOR:
+            chunks.append((parent_heading, intro))
+        for idx, m in enumerate(l2_matches):
+            start = m.start()
+            end = l2_matches[idx + 1].start() if idx + 1 < len(l2_matches) else len(sec_text)
+            block = sec_text[start:end].strip()
+            if not block:
+                continue
+            # Tách số và nội dung còn lại của dòng đầu
+            first_line = block.splitlines()[0] if block else ""
+            mm = re.match(r"^\s*(\d+\.\d+)\.?\s+(.*)", first_line)
+            num = mm.group(1) if mm else ""
+            remainder = mm.group(2) if mm and mm.group(2) else ""
+            # Phần còn lại sau dòng đầu
+            rest_lines = block.splitlines()[1:]
+            rest = "\n".join(rest_lines).strip()
+            # Ghép remainder + rest thành chunk text
+            chunk_text = remainder
+            if rest:
+                chunk_text = f"{chunk_text}\n{rest}" if chunk_text else rest
+            chunk_text = chunk_text.strip()
+            if len(chunk_text) < _MIN_FLOOR:
+                continue
+            combined = parent_heading
+            if num:
+                combined = f"{combined} | {num}." if combined else f"{num}."
+            chunks.append((combined, chunk_text))
+        return chunks if chunks else None
+
+    chunks: list[tuple[str, str]] = []
+    # Intro trước Level1 đầu
+    first_l1_start = l1_matches[0].start()
+    intro = sec_text[:first_l1_start].strip()
+    if intro and len(intro) >= _MIN_FLOOR:
+        chunks.append((parent_heading, intro))
+
+    for i, m1 in enumerate(l1_matches):
+        l1_start = m1.start()
+        l1_end = l1_matches[i + 1].start() if i + 1 < len(l1_matches) else len(sec_text)
+        l1_block = sec_text[l1_start:l1_end].strip()
+        if not l1_block:
+            continue
+        l1_line = m1.group(0).strip()
+        # Nội dung sau dòng L1
+        # Lấy phần sau dòng đầu tiên của block
+        lines_in_block = l1_block.splitlines()
+        first_line = lines_in_block[0] if lines_in_block else ""
+        # Phần còn lại sau dòng L1
+        rest_after_l1 = "\n".join(lines_in_block[1:]).strip() if len(lines_in_block) > 1 else ""
+        # Kiểm tra block này có chứa Level2 không
+        l2_in_block = list(LEVEL2_RE.finditer(l1_block))
+        # Nhưng tìm trong rest_after_l1 thôi, không tính dòng L1
+        l2_in_rest = list(LEVEL2_RE.finditer(rest_after_l1)) if rest_after_l1 else []
+        if l2_in_rest:
+            # Thêm chunk tổng hợp cho cả nhóm 1. để truy vấn rộng lấy đủ 1.1-1.4
+            combined_group_text = rest_after_l1.strip()
+            if len(combined_group_text) >= _MIN_FLOOR:
+                combined_group_heading = parent_heading
+                if l1_line:
+                    combined_group_heading = f"{combined_group_heading} | {l1_line}" if combined_group_heading else l1_line
+                # Nếu quá dài, sẽ được cắt ở bước sau, nhưng vẫn thêm để đảm bảo recall
+                chunks.append((combined_group_heading, combined_group_text))
+            # Có phân cấp con -> tách từng 1.x
+            # Tìm vị trí L2 trong rest_after_l1
+            # Cần offset vì rest_after_l1 là substring
+            # Dùng finditer trên rest_after_l1
+            l2_matches_rest = list(LEVEL2_RE.finditer(rest_after_l1))
+            for j, m2 in enumerate(l2_matches_rest):
+                l2_start = m2.start()
+                l2_end = l2_matches_rest[j + 1].start() if j + 1 < len(l2_matches_rest) else len(rest_after_l1)
+                l2_block = rest_after_l1[l2_start:l2_end].strip()
+                if not l2_block:
+                    continue
+                l2_first = l2_block.splitlines()[0] if l2_block else ""
+                mm2 = re.match(r"^\s*(\d+\.\d+)\.?\s+(.*)", l2_first)
+                l2_num = mm2.group(1) if mm2 else ""
+                l2_rem = mm2.group(2) if mm2 and mm2.group(2) else ""
+                l2_rest = "\n".join(l2_block.splitlines()[1:]).strip() if len(l2_block.splitlines()) > 1 else ""
+                # Thêm ngữ cảnh l1 để chunk 1.1 (về Thẻ) vẫn chứa "không thuộc" và "trang phục" cho truy vấn rộng
+                chunk_text = f"{l1_line} {l2_rem}".strip() if l1_line else l2_rem
+                if l2_rest:
+                    chunk_text = f"{chunk_text}\n{l2_rest}" if chunk_text else l2_rest
+                chunk_text = chunk_text.strip()
+                if len(chunk_text) < _MIN_FLOOR:
+                    continue
+                # Heading kết hợp: parent + l1_line
+                combined = parent_heading
+                if l1_line:
+                    combined = f"{combined} | {l1_line}" if combined else l1_line
+                if l2_num:
+                    combined = f"{combined} | {l2_num}." if combined else f"{l2_num}."
+                chunks.append((combined, chunk_text))
+        else:
+            # Không có Level2 -> mỗi Level1 là một chunk riêng
+            # Nội dung là phần sau số + rest_after_l1 (nếu có)
+            m1_inner = re.match(r"^\s*(\d+)\.\s+(.*)", first_line)
+            l1_rem = m1_inner.group(2) if m1_inner and m1_inner.group(2) else ""
+            chunk_text = l1_rem
+            if rest_after_l1:
+                chunk_text = f"{chunk_text}\n{rest_after_l1}" if chunk_text else rest_after_l1
+            chunk_text = chunk_text.strip()
+            if len(chunk_text) < _MIN_FLOOR:
+                continue
+            combined = parent_heading
+            # Với flat, không cần thêm l1 vào heading vì chunk đã là l1, heading chỉ cần parent
+            # Nhưng để giữ phân biệt, có thể thêm số
+            # Giữ parent làm heading, text đã có số
+            # Để retrieval tốt, thêm l1_line vào heading cũng được, nhưng sẽ dài
+            # Chọn chỉ dùng parent
+            chunks.append((combined, chunk_text if len(chunk_text) >= _MIN_FLOOR else l1_line))
+    return chunks if chunks else None
+
+
 def _add_overlap(chunks: list[str], overlap_sentences: int = 1) -> list[str]:
     """
     Thêm overlap câu giữa các chunk liên tiếp.
@@ -519,7 +658,53 @@ def contextual_chunk(
     for heading, sec_text in sections:
         if not sec_text.strip():
             continue
-        # Semantic chunk trong từng section (giữ coherence theo heading)
+        # ── Cách 1: Tách phân cấp số 1./1.1 trước khi semantic ──
+        hierarchical = _split_numbered_hierarchical(heading, sec_text)
+        if hierarchical is not None:
+            enriched_hier: list[str] = []
+            for comb_heading, chunk_text in hierarchical:
+                if not chunk_text or len(chunk_text.strip()) < _MIN_FLOOR:
+                    continue
+                # Nếu chunk_text quá dài, tách tiếp bằng semantic
+                if len(chunk_text) > effective_max:
+                    sub_pieces = semantic_chunk(chunk_text, embed_fn, min_chars, max_chars, threshold)
+                    if not sub_pieces:
+                        sub_pieces = [chunk_text[i:i+effective_max] for i in range(0, len(chunk_text), effective_max)]
+                    for piece in sub_pieces:
+                        if len(piece.strip()) < _MIN_FLOOR:
+                            continue
+                        enriched = piece
+                        if heading_enrich and comb_heading:
+                            enriched = _enrich_with_heading(enriched, comb_heading, metadata)
+                        if use_llm_context:
+                            enriched = _generate_llm_context(enriched, comb_heading, doc_snippet, metadata)
+                        if len(enriched) > effective_max:
+                            if ":\n" in enriched and heading_enrich and comb_heading:
+                                pref, body = enriched.split(":\n", 1)
+                                pref += ":\n"
+                                body = body[: max(0, effective_max - len(pref))]
+                                enriched = (pref + body).strip()
+                            else:
+                                enriched = enriched[:effective_max].strip()
+                        enriched_hier.append(enriched)
+                else:
+                    enriched = chunk_text
+                    if heading_enrich and comb_heading:
+                        enriched = _enrich_with_heading(enriched, comb_heading, metadata)
+                    if use_llm_context:
+                        enriched = _generate_llm_context(enriched, comb_heading, doc_snippet, metadata)
+                    if len(enriched) > effective_max:
+                        if ":\n" in enriched and heading_enrich and comb_heading:
+                            pref, body = enriched.split(":\n", 1)
+                            pref += ":\n"
+                            body = body[: max(0, effective_max - len(pref))]
+                            enriched = (pref + body).strip()
+                        else:
+                            enriched = enriched[:effective_max].strip()
+                    enriched_hier.append(enriched)
+            all_chunks.extend(enriched_hier)
+            continue
+        # Fallback: Semantic chunk trong từng section (giữ coherence theo heading)
         sec_chunks = semantic_chunk(sec_text, embed_fn, min_chars, max_chars, threshold)
         # Nếu section ngắn mà semantic trả về rỗng, giữ nguyên section nếu đạt sàn an toàn
         # (tránh mất điều khoản ngắn có giá trị khi ngưỡng mong muốn cao)

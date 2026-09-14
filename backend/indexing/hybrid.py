@@ -79,8 +79,8 @@ def hybrid_retrieve(query: str, top_k: int = 3, category: str | None = None, vec
         # Fallback pure vector (có session_id nếu truyền)
         return vector_retrieve(query, top_k=top_k, category=category, dedup=True, session_id=session_id)
 
-    vk = vector_k or (top_k * 2)
-    bk = bm25_k or (top_k * 2)
+    vk = vector_k or (top_k * 5)
+    bk = bm25_k or (top_k * 5)
 
     vec_docs = []
     bm25_docs = []

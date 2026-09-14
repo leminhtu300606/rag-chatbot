@@ -388,6 +388,8 @@ class ChatResponse(BaseModel):
     math_result: Optional[str] = None
     math_expression: Optional[str] = None
     is_social: bool = False  # True nếu là câu xã giao, không cần tài liệu chứng minh
+    needs_clarification: bool = False  # True nếu câu hỏi chưa rõ ý cần hỏi lại
+    clarify_reason: Optional[str] = None
 
 # --- Helpers ---
 def _get_stats():
@@ -1014,6 +1016,27 @@ async def chat(req: ChatRequest, request: Request):
             # Cập nhật style từ kết quả nếu có (phát hiện đổi phong cách)
             final_style = res.get("style", effective_style)
             is_social_res = res.get("is_social", False)
+            # Hỏi lại nếu câu hỏi chưa rõ ý
+            if res.get("needs_clarification"):
+                if session_id:
+                    _append_to_session(session_id, req.question, res["answer"], res.get("summary"), style=final_style, last_math_result=None)
+                    with _sessions_lock:
+                        if session_id in _sessions and final_style in cfg.AVAILABLE_STYLES:
+                            _sessions[session_id]["style"] = final_style
+                    _save_sessions()
+                return ChatResponse(
+                    answer=res["answer"],
+                    sources=[],
+                    context=[] if req.show_context else None,
+                    session_id=session_id,
+                    standalone_question=res.get("standalone_question"),
+                    summary=res.get("summary"),
+                    history_used=res.get("history_used"),
+                    style=final_style,
+                    needs_clarification=True,
+                    clarify_reason=res.get("clarify_reason"),
+                    is_social=False,
+                )
             # Xử lý so sánh trước toán học: giữ last_math_result cũ (không ghi đè bằng biểu thức so sánh)
             if "comparison_answer" in res:
                 comp_math_res = res.get("math_result")
@@ -1140,6 +1163,22 @@ async def chat(req: ChatRequest, request: Request):
                 pass
             final_style = res.get("style", effective_style)
             is_social_res_single = res.get("is_social", False)
+            # Hỏi lại nếu chưa rõ ý
+            if res.get("needs_clarification"):
+                if session_id:
+                    _append_to_session(session_id, req.question, res["answer"], style=final_style, last_math_result=None)
+                    _save_sessions()
+                return ChatResponse(
+                    answer=res["answer"],
+                    sources=[],
+                    context=[] if req.show_context else None,
+                    session_id=session_id,
+                    standalone_question=res.get("standalone_question"),
+                    style=final_style,
+                    needs_clarification=True,
+                    clarify_reason=res.get("clarify_reason"),
+                    is_social=False,
+                )
             # So sánh đơn lượt: không ghi đè last_math_result bằng biểu thức so sánh
             if "comparison_answer" in res:
                 comp_math_res = res.get("math_result")

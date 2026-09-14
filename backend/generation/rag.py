@@ -121,6 +121,72 @@ def _prepare_history(
     return (cleaned if cleaned else None), summary
 
 
+# ── Hỏi lại khi chưa rõ ý ──
+_VAGUE_PHRASES = [
+    "nó là gì", "cái đó là gì", "cái này là gì", "việc đó là gì", "điều đó là gì",
+    "thế nào", "ra sao", "sao vậy", "là sao", "là gì vậy", "là gì thế",
+    "nói rõ hơn", "giải thích thêm", "còn gì nữa", "tiếp đi", "kể thêm",
+    "quy định đó", "quy chế đó", "thông báo đó", "quyết định đó",
+]
+
+def _is_unclear_question(question: str, history=None, standalone: str | None = None) -> tuple[bool, str]:
+    """Phát hiện câu hỏi chưa rõ ý để hỏi lại thay vì đoán bừa."""
+    if not question or not question.strip():
+        return True, "empty"
+    q = question.strip()
+    q_low = q.lower()
+    # Bỏ qua xã giao/toán đã xử lý trước, nhưng vẫn kiểm tra ngắn
+    if len(q) < 8:
+        # Rất ngắn như "là gì?" "sao?" mà không có lịch sử -> chưa rõ
+        if not history:
+            return True, "too_short_no_history"
+        # Có lịch sử nhưng vẫn chỉ 1-2 từ mơ hồ
+        if q_low in ["là gì?", "là gì", "thế nào?", "thế nào", "ra sao?", "ra sao", "sao vậy?", "sao vậy"]:
+            return True, "too_short_pronoun"
+    # Chứa toàn cụm mơ hồ và không có danh từ chuyên môn cụ thể
+    has_vague = any(p in q_low for p in _VAGUE_PHRASES)
+    # Kiểm tra có từ chuyên môn cụ thể không
+    professional_hints = ["quy chế", "quy định", "quyết định", "thông báo", "tài liệu", "học viện", "kỹ thuật mật mã", "đào tạo", "khảo thí", "học bổng", "tín chỉ", "trang phục", "văn hóa", "kỷ luật", "tốt nghiệp", "môn học", "học phí", "điểm", "thi ", "lớp", "giảng viên"]
+    has_professional = any(h in q_low for h in professional_hints)
+    # Nếu câu chứa cụm mơ hồ và ngắn (<30 ký tự) thì chưa rõ, kể cả có từ chuyên môn nhưng chỉ là "quy định đó là gì?"
+    if has_vague and len(q) < 30:
+        if any(p in q_low for p in ["quy định đó", "quy chế đó", "thông báo đó", "quyết định đó"]):
+            if len(q.split()) <= 6:
+                return True, "vague_with_that_short"
+        # Nếu chỉ có vague mà không có professional -> chưa rõ
+        if not has_professional:
+            return True, "vague_no_professional"
+        # Nếu có vague như "nó là gì", "cái đó thế nào" mà câu ngắn -> chưa rõ
+        if any(p in q_low for p in ["nó là gì", "cái đó là gì", "cái này là gì", "thế nào", "ra sao"]):
+            if len(q) < 25:
+                return True, "vague_short"
+    # Câu chỉ có đại từ "nó", "cái đó" mà không có lịch sử hoặc standalone vẫn chứa đại từ
+    if standalone and any(p.strip() in standalone.lower() for p in [" nó ", " cái đó", " cái này", " việc đó"]):
+        return True, "standalone_still_vague"
+    if not has_professional and len(q.split()) <= 3 and len(q) < 20:
+        # Ví dụ "quy định đó?" "cái đó sao?"
+        return True, "too_generic"
+    return False, ""
+
+def _make_clarification(question: str, style: str | None = None) -> str:
+    """Tạo câu hỏi lại tự nhiên, gợi ý các chủ đề có trong tài liệu."""
+    # Gợi ý theo style
+    base = (
+        "Câu hỏi của bạn hơi chung chung nên mình chưa chắc bạn đang muốn hỏi về phần nào. "
+        "Bạn có thể nói rõ hơn một chút được không? "
+    )
+    hints = "Ví dụ: quy chế đào tạo, quy định văn hóa học đường (trang phục, giao tiếp), quy định khảo thí, học bổng/học phí, hay thông báo cụ thể nào?"
+    # Nếu câu hỏi có từ "quy định đó" thì hỏi rõ quy định nào
+    q_low = question.lower() if question else ""
+    if "quy định" in q_low and "đó" in q_low:
+        return base + "Bạn đang muốn hỏi về quy định nào trong số trên? Cho mình xin tên quy định hoặc nội dung cụ thể hơn nhé."
+    if "quy chế" in q_low and "đó" in q_low:
+        return base + "Bạn muốn hỏi về quy chế nào? Ví dụ quy chế đào tạo hay quy chế công tác học viên?"
+    if any(p in q_low for p in ["nó", "cái đó", "cái này"]):
+        return base + hints
+    return base + hints
+
+
 def answer(
     question: str,
     category: str = None,
@@ -295,9 +361,24 @@ def answer(
             "is_social": True,
         }
 
+    # Hỏi lại nếu câu hỏi chưa rõ ý (trước khi retrieve để tránh đoán bừa)
+    _unclear, _reason = _is_unclear_question(effective_question, history=None, standalone=None)
+    if _unclear:
+        clar = _make_clarification(effective_question, style=effective_style)
+        return {
+            "answer": validate_output(clar),
+            "sources": [],
+            "context": [],
+            "style": effective_style,
+            "standalone_question": effective_question,
+            "needs_clarification": True,
+            "clarify_reason": _reason,
+        }
+
     if top_k is None:
         top_k = DEFAULT_RERANK_TOP_K if (use_rerank and rerank) else RETRIEVE_TOP_K
-    fetch_k = top_k * 3 if use_rerank and rerank else top_k
+    # Giới hạn fetch_k tối đa 10 để tránh vượt validate khi top_k=4/5 (cách 1 cần 4 điểm 1.x)
+    fetch_k = min(top_k * 3, 10) if use_rerank and rerank else top_k
 
     query_for_retrieval = effective_question
     # Validate tool call: AI chỉ đề xuất, backend kiểm tra
@@ -309,6 +390,19 @@ def answer(
         context = deduplicate_docs(context, threshold=0.92)
     except Exception:
         pass
+
+    # Nếu không tìm thấy ngữ cảnh nào khớp, hỏi lại thay vì đoán bừa
+    if not context:
+        clar = _make_clarification(effective_question, style=effective_style) + " (Hiện mình chưa tìm thấy tài liệu nào khớp với câu hỏi này, bạn có thể cho thêm chi tiết được không?)"
+        return {
+            "answer": validate_output(clar),
+            "sources": [],
+            "context": [],
+            "style": effective_style,
+            "standalone_question": effective_question,
+            "needs_clarification": True,
+            "clarify_reason": "no_context",
+        }
 
     if use_rerank and rerank and context:
         validate_tool_call("rerank", {"top_k": top_k})
@@ -549,9 +643,25 @@ def answer_with_history(
         except Exception:
             standalone_q = effective_question
 
+    # Hỏi lại nếu câu hỏi vẫn mơ hồ sau khi viết lại (tránh đoán bừa)
+    _unclear_h, _reason_h = _is_unclear_question(effective_question, history=history_window, standalone=standalone_q)
+    if _unclear_h:
+        clar = _make_clarification(effective_question, style=effective_style)
+        return {
+            "answer": validate_output(clar),
+            "sources": [],
+            "context": [],
+            "style": effective_style,
+            "standalone_question": standalone_q,
+            "summary": summary,
+            "history_used": history_window,
+            "needs_clarification": True,
+            "clarify_reason": _reason_h,
+        }
+
     if top_k is None:
         top_k = DEFAULT_RERANK_TOP_K if (use_rerank and rerank) else RETRIEVE_TOP_K
-    fetch_k = top_k * 3 if use_rerank and rerank else top_k
+    fetch_k = min(top_k * 3, 10) if use_rerank and rerank else top_k
     # Validate tool call trước khi retrieve
     validate_tool_call("retrieve", {"category": category, "top_k": fetch_k})
 
@@ -562,6 +672,21 @@ def answer_with_history(
         context = deduplicate_docs(context, threshold=0.92)
     except Exception:
         pass
+
+    # Nếu không tìm thấy ngữ cảnh nào khớp, hỏi lại thay vì bịa
+    if not context:
+        clar = _make_clarification(effective_question, style=effective_style) + " (Hiện mình chưa tìm thấy tài liệu nào khớp với câu hỏi này, bạn có thể cho thêm chi tiết được không?)"
+        return {
+            "answer": validate_output(clar),
+            "sources": [],
+            "context": [],
+            "style": effective_style,
+            "standalone_question": standalone_q,
+            "summary": summary,
+            "history_used": history_window,
+            "needs_clarification": True,
+            "clarify_reason": "no_context",
+        }
 
     if use_rerank and rerank and context:
         validate_tool_call("rerank", {"top_k": top_k})
