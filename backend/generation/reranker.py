@@ -61,6 +61,19 @@ def rerank(query: str, documents: list[dict], top_k: Optional[int] = None) -> li
     """
     if not documents:
         return []
+    # Lọc doc lỗi/rỗng trước khi gọi model để tránh crash với query điều khoản ngắn
+    filtered = []
+    for d in documents:
+        try:
+            txt = (d.get("text") or "").strip()
+            if not txt or len(txt) < 5:
+                continue
+            filtered.append(d)
+        except Exception:
+            continue
+    if not filtered:
+        return documents[: top_k if top_k is not None else DEFAULT_RERANK_TOP_K]
+    documents = filtered
 
     if top_k is None:
         top_k = DEFAULT_RERANK_TOP_K
@@ -69,7 +82,15 @@ def rerank(query: str, documents: list[dict], top_k: Optional[int] = None) -> li
     try:
         scores = _get_reranker().predict(pairs, batch_size=_get_rerank_batch(), show_progress_bar=False)
     except TypeError:
-        scores = _get_reranker().predict(pairs)
+        try:
+            scores = _get_reranker().predict(pairs)
+        except Exception as e:
+            # Fallback an toàn: nếu rerank lỗi (ví dụ query quá ngắn chứa Khoản/Điều), trả về thứ tự gốc
+            print(f"[rerank] fallback do lỗi predict: {e}")
+            return documents[:top_k]
+    except Exception as e:
+        print(f"[rerank] fallback do lỗi predict: {e}")
+        return documents[:top_k]
 
     reranked = []
     for doc, score in zip(documents, scores):

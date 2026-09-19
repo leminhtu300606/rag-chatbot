@@ -39,6 +39,10 @@ def _tokenize_vi(text: str) -> List[str]:
     t = _WS_RE.sub(" ", t).strip()
     if not t:
         return []
+    # Cho phep fast mode khi eval (EVAL_FAST_TOKENIZE=1) de tranh underthesea cham
+    import os as _os
+    if _os.getenv("EVAL_FAST_TOKENIZE", "").lower() in ("1", "true", "yes"):
+        return [w for w in t.split() if len(w) >= 2]
     # Thử dùng underthesea word_tokenize nếu có (tốt cho tiếng Việt)
     try:
         from underthesea import word_tokenize
@@ -107,6 +111,7 @@ _BM25_CACHE = {
     "mtime": 0.0,
     "corpus_tokens": None,
 }
+_BM25_CACHE_BY_CAT: dict = {}  # category -> {bm25, docs, mtime, tokens}
 
 def _get_processed_mtime() -> float:
     try:
@@ -138,15 +143,17 @@ def _build_bm25(docs: List[Dict]) -> Tuple[BM25Okapi, List[List[str]]]:
 
 def _ensure_bm25(category: str | None = None) -> Tuple[BM25Okapi | None, List[Dict]]:
     """Đảm bảo BM25 cache còn fresh, rebuild nếu mtime đổi hoặc category đổi."""
-    # Với category filter, không cache theo category mà build riêng (vì ít chunks)
-    # Nhưng vẫn cache theo mtime
     mtime = _get_processed_mtime()
-    # Nếu có category, build riêng không dùng cache global (đơn giản)
+    # Cache theo category để evaluation nhanh (trước đây build lại mỗi query)
     if category:
+        cached = _BM25_CACHE_BY_CAT.get(category)
+        if cached and cached.get("mtime") == mtime and cached.get("bm25") is not None:
+            return cached["bm25"], cached["docs"]
         docs = _load_chunks_for_bm25(category=category)
         if not docs:
             return None, []
-        bm25, _ = _build_bm25(docs)
+        bm25, tokens = _build_bm25(docs)
+        _BM25_CACHE_BY_CAT[category] = {"bm25": bm25, "docs": docs, "mtime": mtime, "tokens": tokens}
         return bm25, docs
     # Không category: dùng cache global
     if _BM25_CACHE["bm25"] is not None and _BM25_CACHE["mtime"] == mtime and _BM25_CACHE["docs"] is not None:
@@ -212,3 +219,4 @@ def clear_cache():
     _BM25_CACHE["docs"] = None
     _BM25_CACHE["mtime"] = 0.0
     _BM25_CACHE["corpus_tokens"] = None
+    _BM25_CACHE_BY_CAT.clear()

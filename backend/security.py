@@ -84,8 +84,14 @@ def sanitize_input(text: str, max_len: int = 2000) -> str:
         text = text[:max_len]
     # Loại bỏ ký tự điều khiển nguy hiểm (giữ lại \n, \t)
     text = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", text)
+    # Loại bỏ tham số kỹ thuật lẫn vào câu hỏi (ví dụ: "rerank:true • top_k:3" do copy từ UI)
+    # để tránh LLM hiểu nhầm là yêu cầu tiết lộ cấu hình và từ chối nhầm (trang phục -> chặn)
+    text = re.sub(r"\b(rerank|top_k|top-k|use_rerank|use_history|show_context|category)\s*[:=]\s*(true|false|\d+|[a-z_]+)", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"[•|]\s*(rerank|top_k).*", "", text, flags=re.IGNORECASE)
     # Chuẩn hoá khoảng trắng
     text = re.sub(r"\s+", " ", text).strip()
+    # Loại bỏ dấu "•" thừa còn lại ở cuối
+    text = text.strip(" •|-,")
     return text
 
 def sanitize_history(history: Optional[List[Dict[str, Any]]], max_items: int = 20, max_chars: int = 600) -> Optional[List[Dict[str, Any]]]:
@@ -184,32 +190,52 @@ def validate_tool_call(tool_name: str, params: Dict[str, Any]) -> Dict[str, Any]
     return params
 
 # ── 5. Output validation ──
-# Những gì không được để lộ
+# Những gì không được để lộ - đã tinh chỉnh để tránh chặn nhầm câu trả lời hợp lệ như trang phục
+# Mẫu cuối yêu cầu phải có "Thứ tự ưu tiên" (cụm đặc trưng của system prompt), không chỉ "Quy tắc bảo mật" chung chung
 FORBIDDEN_OUTPUT_PATTERNS = [
     r"system\s+prompt",
     r"lời\s+dặn\s+hệ\s+thống",
     r"instruction\s+hierarchy",
     r"<<<UNTRUSTED_DATA",
     r"SECURITY_RULES",
-    r"Bạn\s+là\s+trợ\s+lý.*Học\s+viện.*Mật\s+mã.*Quy\s+tắc\s+bảo\s+mật",
+    r"Bạn\s+là\s+trợ\s+lý.*Học\s+viện.*Mật\s+mã.*Thứ\s+tự\s+ưu\s+tiên",
+    r"THỨ\s+TỰ\s+ƯU\s+TIÊN.*Quy\s+tắc\s+hệ\s+thống",
 ]
 
 _FORBIDDEN_RE = re.compile("|".join(FORBIDDEN_OUTPUT_PATTERNS), re.IGNORECASE)
 
-def validate_output(answer: str, max_len: int = 4000) -> str:
+def validate_output(answer: str, max_len: int = 12000) -> str:
     """Kiểm tra kết quả AI trước khi trả về."""
     if not answer:
         return "Không đủ nguồn trong tài liệu để trả lời chắc chắn."
-    # Giới hạn độ dài
+    # Giới hạn độ dài - tăng lên 12000 để không cắt câu trả lời dài có bảng/bullet (trước là 4000 gây cụt ở "Đảng-Chính...")
     if len(answer) > max_len:
-        answer = answer[:max_len] + "...[cắt bớt]"
-    # Kiểm tra lộ system prompt
-    if _FORBIDDEN_RE.search(answer):
-        # Loại bỏ phần lộ
-        answer = re.sub(_FORBIDDEN_RE, "[đã ẩn]", answer)
-        # Nếu toàn bộ là lộ, trả về mặc định
-        if len(answer.strip()) < 20:
-            return "Mình không thể chia sẻ thông tin hệ thống."
+        # Cố gắng cắt tại ranh giới câu hoàn chỉnh gần max_len để tránh cụt giữa từ
+        cut = answer[:max_len]
+        # Tìm dấu câu hoàn chỉnh gần cuối trong 400 ký tự cuối
+        last_punct = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"), cut.rfind("。"), cut.rfind("\n\n"))
+        if last_punct > max_len - 600 and last_punct > 0:
+            answer = cut[: last_punct + 1] + "\n\n...[còn tiếp - vui lòng hỏi 'nói tiếp' để xem phần còn lại]"
+        else:
+            answer = cut.rstrip() + "...[cắt bớt do vượt ngưỡng - vui lòng hỏi 'nói tiếp']"
+    # Kiểm tra lộ system prompt - chỉ chặn khi thực sự lộ phần lớn system prompt (tránh chặn nhầm câu trang phục)
+    m = _FORBIDDEN_RE.search(answer)
+    if m:
+        matched_len = len(m.group(0))
+        orig_len = len(answer)
+        # Nếu match chiếm phần lớn câu trả lời ngắn (<500 ký tự) thì coi là lộ hoàn toàn
+        # Nếu câu trả lời dài và chỉ lộ 1 đoạn nhỏ thì chỉ ẩn đoạn đó, giữ lại nội dung hợp lệ
+        if matched_len > orig_len * 0.5 and orig_len < 500:
+            answer = re.sub(_FORBIDDEN_RE, "[đã ẩn]", answer)
+            if len(answer.strip()) < 20:
+                return "Mình không thể chia sẻ thông tin hệ thống."
+        else:
+            # Trường hợp lộ trong câu dài (ví dụ leak kèm nội dung trang phục) -> chỉ ẩn phần lộ
+            answer = re.sub(_FORBIDDEN_RE, "[đã ẩn]", answer)
+            # Chỉ trả về câu chặn khi sau khi ẩn mà gần như không còn gì và match dài (>100)
+            if len(answer.strip()) < 20 and matched_len > 100:
+                return "Mình không thể chia sẻ thông tin hệ thống."
+            # Nếu còn nội dung hợp lệ sau khi ẩn thì giữ lại, không chặn nhầm
     # Loại bỏ delimiter giả mạo trong output
     answer = answer.replace(DATA_START, "").replace(DATA_END, "")
     # Kiểm tra xem output có chứa lệnh injection được lặp lại không

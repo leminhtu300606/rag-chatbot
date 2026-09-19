@@ -18,6 +18,87 @@ const summaryInfo = $("#summary-info");
 
 let isLoading = false;
 
+// helper: chi hien panel nguon tren desktop, tranh tron man hinh tren mobile/tablet
+function isDesktopSourcesVisible(){
+  try { return window.matchMedia("(min-width: 1121px)").matches; } catch(e){ return window.innerWidth > 1120; }
+}
+function getSourcesBackdrop(){ return document.querySelector("#sources-backdrop"); }
+function showSourcesPanel(){
+  const rp = document.querySelector("#right-panel");
+  const bd = getSourcesBackdrop();
+  if(!rp) return;
+  if(isDesktopSourcesVisible()){
+    // Desktop: dam bao panel hien 300px ben phai, khong full-screen
+    rp.classList.remove("open");
+    if(bd) bd.classList.add("hidden");
+    if(rp.style.display === "none") rp.style.removeProperty("display");
+    const cs = window.getComputedStyle(rp);
+    if(cs.display === "none"){
+      rp.style.display = "flex";
+    }
+  } else {
+    // Mobile/Tablet: khong tu dong hien tron man hinh. Chi hien khi user bam nut toggle.
+    // De tranh lam phien, tu dong hien khong lam gi ca.
+    return;
+  }
+}
+function showSourcesPanelManual(){
+  const rp = document.querySelector("#right-panel");
+  const bd = getSourcesBackdrop();
+  if(!rp) return;
+  if(isDesktopSourcesVisible()){
+    rp.classList.remove("open");
+    if(bd) bd.classList.add("hidden");
+    rp.style.removeProperty("display");
+    const cs = window.getComputedStyle(rp);
+    if(cs.display === "none") rp.style.display = "flex";
+  } else {
+    // Mobile: hien dang drawer 360px, khong full-screen
+    rp.classList.add("open");
+    rp.style.removeProperty("display");
+    // force display flex via class, backdrop hien
+    if(bd) bd.classList.remove("hidden");
+  }
+}
+function hideSourcesPanel(){
+  const rp = document.querySelector("#right-panel");
+  const bd = getSourcesBackdrop();
+  if(rp){
+    rp.style.display = "none";
+    rp.classList.remove("open");
+  }
+  if(bd) bd.classList.add("hidden");
+}
+function toggleSourcesPanel(){
+  const rp = document.querySelector("#right-panel");
+  if(!rp) return;
+  const cs = window.getComputedStyle(rp);
+  const isVisible = cs.display !== "none" && rp.style.display !== "none" && !rp.classList.contains("hidden") && (rp.classList.contains("open") || cs.display === "flex");
+  // Don gian: neu dang an thi hien, dang hien thi an
+  let currentlyHidden = false;
+  if(isDesktopSourcesVisible()){
+    currentlyHidden = cs.display === "none" || rp.style.display === "none";
+  } else {
+    currentlyHidden = !rp.classList.contains("open") && (cs.display === "none" || rp.style.display === "none");
+    // Neu panel dang an do media query, thi coi la hidden
+    if(cs.display === "none" && !rp.classList.contains("open")) currentlyHidden = true;
+  }
+  if(currentlyHidden){
+    // neu hidden thi hien manual
+    if(isDesktopSourcesVisible()){
+      rp.style.removeProperty("display");
+      if(rp.style.display === "none") rp.style.display = "flex";
+      // ensure visible
+      const cs2 = window.getComputedStyle(rp);
+      if(cs2.display === "none") rp.style.display = "flex";
+    } else {
+      showSourcesPanelManual();
+    }
+  } else {
+    hideSourcesPanel();
+  }
+}
+
 const TYPEWRITER_SPEED = 12; // giảm từ 18 để hiện nhanh hơn
 let _typingAbort = null;
 const ENABLE_STREAM = false; // tắt streaming để chỉ hiện kiểu gõ chữ, tránh hiện 2 lần
@@ -239,7 +320,14 @@ function addMsg(role, text, meta=""){
   const inner=document.createElement("div");
   inner.className="msg-inner";
   const avatar=role==="user"?'<div class="avatar user">U</div>':'<div class="avatar assistant"><i class="fa-solid fa-robot"></i></div>';
-  inner.innerHTML=`${avatar}<div class="bubble">${escapeHtml(text)}${meta?`<div class="meta">${meta}</div>`:""}</div>`;
+  let bodyHtml = "";
+  if(role === "assistant"){
+    // Render markdown for assistant, keep citation brackets safe
+    bodyHtml = `<div class="answer-body">${renderMarkdown(text)}</div>`;
+  } else {
+    bodyHtml = escapeHtml(text);
+  }
+  inner.innerHTML=`${avatar}<div class="bubble">${bodyHtml}${meta?`<div class="meta">${meta}</div>`:""}</div>`;
   row.appendChild(inner);
   if(messages) messages.appendChild(row);
   if(messages) messages.scrollTop=messages.scrollHeight;
@@ -519,7 +607,23 @@ window.addEventListener("popstate", ()=>{
 // Sidebar toggle (ChatGPT mobile)
 $("#open-sidebar")?.addEventListener("click", ()=> $("#sidebar").classList.add("open"));
 $("#close-sidebar")?.addEventListener("click", ()=> $("#sidebar").classList.remove("open"));
-$("#close-right")?.addEventListener("click", ()=> { const rp=$("#right-panel"); if(rp) rp.style.display="none"; });
+$("#close-right")?.addEventListener("click", ()=> hideSourcesPanel());
+$("#toggle-sources")?.addEventListener("click", ()=> toggleSourcesPanel());
+$("#sources-backdrop")?.addEventListener("click", ()=> hideSourcesPanel());
+// Dong drawer khi resize ve desktop thi lam sach class open
+window.addEventListener("resize", ()=>{
+  const rp = document.querySelector("#right-panel");
+  const bd = getSourcesBackdrop();
+  if(!rp) return;
+  if(isDesktopSourcesVisible()){
+    rp.classList.remove("open");
+    if(bd) bd.classList.add("hidden");
+    // Neu truoc do bi an do hide tren mobile, khi len desktop thi hien lai
+    if(rp.style.display === "none"){
+      rp.style.removeProperty("display");
+    }
+  }
+});
 
 // New chat - cùng tab, không xóa phiên cũ, lưu bền vững (đảm bảo click luôn có phản hồi)
 async function createNewChatSameTab(){
@@ -565,6 +669,34 @@ document.querySelectorAll(".example, .chip").forEach(ch=>{
 });
 
 function escapeHtml(s){return s.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]))}
+function renderMarkdown(md){
+  const text = md == null ? "" : String(md);
+  // Prefer marked + DOMPurify if available
+  try{
+    if(typeof marked !== "undefined" && marked && typeof marked.parse === "function"){
+      // Configure once
+      if(!renderMarkdown._configured){
+        try{ marked.setOptions({ gfm:true, breaks:true, mangle:false, headerIds:false }); }catch(e){}
+        renderMarkdown._configured = true;
+      }
+      let raw = marked.parse(text);
+      if(typeof DOMPurify !== "undefined" && DOMPurify && typeof DOMPurify.sanitize === "function"){
+        // Allow basic tags, strip dangerous
+        raw = DOMPurify.sanitize(raw, {USE_PROFILES:{html:true}});
+      }
+      return raw;
+    }
+    if(typeof window !== "undefined" && window.marked && typeof window.marked.parse === "function"){
+      let raw = window.marked.parse(text);
+      if(typeof window.DOMPurify !== "undefined") raw = window.DOMPurify.sanitize(raw);
+      return raw;
+    }
+  }catch(e){
+    // fallback below
+  }
+  // Fallback: escape and convert newlines, basic bullet/table handling
+  return escapeHtml(text).replace(/\n/g,"<br>");
+}
 function setStatus(t){ if(statusEl) statusEl.textContent=t; }
 
 // ── Typewriter effect: hiển thị từng chữ ──
@@ -578,8 +710,17 @@ function typeWriterEffect(targetEl, text, speed = TYPEWRITER_SPEED){
     if(bubble) bubble.classList.add("typing");
     bubble && bubble.setAttribute("title","Nhấp để hiện toàn bộ");
 
+    function isAssistantBody(){
+      return targetEl.classList.contains("answer-text") || targetEl.parentElement?.classList.contains("answer-text") || targetEl.closest(".answer-text");
+    }
+
     function finish(){
-      targetEl.innerHTML = escapeHtml(text).replace(/\n/g,"<br>");
+      // Final render: markdown for assistant, plain for user
+      if(isAssistantBody()){
+        targetEl.innerHTML = renderMarkdown(text);
+      } else {
+        targetEl.innerHTML = escapeHtml(text).replace(/\n/g,"<br>");
+      }
       if(metaEl) metaEl.style.display = "";
       if(bubble){ bubble.classList.remove("typing"); bubble.removeAttribute("title"); }
       if(messages) messages.scrollTop = messages.scrollHeight;
@@ -602,6 +743,7 @@ function typeWriterEffect(targetEl, text, speed = TYPEWRITER_SPEED){
       if(i <= text.length){
         const partial = text.slice(0, i);
         const cursor = i < text.length ? '<span class="typing-cursor"></span>' : '';
+        // During typing show plain preview to avoid broken markdown mid-way
         targetEl.innerHTML = escapeHtml(partial).replace(/\n/g,"<br>") + cursor;
         if(messages) messages.scrollTop = messages.scrollHeight;
         if(i < text.length){
@@ -790,7 +932,7 @@ async function uploadFile(file){
     // Hiển thị nguồn nếu có
     if(j.sources && j.sources.length){
       sourcesEl.innerHTML = j.sources.map(s=>`<div class="source"><b>${escapeHtml(s.filename||"")}</b> trang ${s.page} • uploaded<br><span class="hint">${escapeHtml(s.filename||"")}</span></div>`).join("");
-      const rp=$("#right-panel"); if(rp) rp.style.display="flex";
+      showSourcesPanel();
     }
   }catch(e){
     bubble.innerHTML = `❌ <b>Lỗi tải file:</b> ${escapeHtml(String(e.message||e))}<div class="meta">Thử lại hoặc chia nhỏ file</div>`;
@@ -941,8 +1083,16 @@ async function send(){
     }
     if(!streamed){
       const r=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-      j=await r.json();
-      if(!r.ok) throw new Error(j.detail||JSON.stringify(j));
+      let rawText = await r.text();
+      let parsed;
+      try{ parsed = JSON.parse(rawText); }catch(e){ parsed = {detail: rawText}; }
+      j = parsed;
+      if(!r.ok){
+        let detailMsg = j.detail ?? j.error ?? j.message ?? rawText;
+        if(typeof detailMsg === 'object') detailMsg = JSON.stringify(detailMsg, null, 2);
+        if(!detailMsg || detailMsg === '[object Object]') detailMsg = JSON.stringify(j, null, 2);
+        throw new Error(detailMsg);
+      }
     }
 
     // Đồng bộ style nếu server phát hiện đổi phong cách qua câu tự nhiên
@@ -994,10 +1144,10 @@ async function send(){
     bubble.innerHTML=`<span class="answer-text"></span><div class="meta">${sourceBadge}<span class="tool">parquet • rerank top3${histInfo}</span>${mathBadge}${rewriteBadge}</div>`;
      if(needsClarify){
       sourcesEl.innerHTML='<p class="hint">❓ Câu hỏi chưa rõ, hãy bổ sung thêm chi tiết để mình hỗ trợ chính xác hơn.</p>';
-      const rp=$("#right-panel"); if(rp) rp.style.display="flex";
+      showSourcesPanel();
     } else if(isSocial){
       sourcesEl.innerHTML='<p class="hint">💬 Cuộc trò chuyện xã giao, không cần tài liệu chứng minh.</p>';
-      const rp=$("#right-panel"); if(rp) rp.style.display="flex";
+      showSourcesPanel();
     } else if(j.sources && j.sources.length){
       sourcesEl.innerHTML=j.sources.map(s=>{
         const sec=(s.section||"").trim();
@@ -1016,7 +1166,7 @@ async function send(){
         }
         return `<div class="source"><b>${escapeHtml(s.filename||"")}</b> ${loc} • ${escapeHtml(s.category||"")}/${escapeHtml(s.subcategory||"")}<br><span class="hint">${escapeHtml(s.source||"")}</span></div>`;
       }).join("");
-      const rp=$("#right-panel"); if(rp) rp.style.display="flex";
+      showSourcesPanel();
     }else sourcesEl.innerHTML='<p class="hint">Không có nguồn.</p>';
 
     if (needsClarify) {
@@ -1080,7 +1230,16 @@ async function send(){
     setStatus("");
   }catch(e){
     if(_typingAbort) try{ _typingAbort(); }catch(_){}
-    const msg = String(e.message||e);
+    let rawMsg = e.message ?? e.detail ?? e;
+    let msg;
+    if(typeof rawMsg === 'object'){
+      try{ msg = JSON.stringify(rawMsg, null, 2); }catch(_){ msg = String(rawMsg); }
+    } else {
+      msg = String(rawMsg);
+    }
+    if(msg === '[object Object]' || msg === '{}'){
+      try{ msg = JSON.stringify(e, null, 2); }catch(_){ msg = String(e); }
+    }
     const isNetErr = msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("load failed");
     const bubble=placeholder.querySelector(".bubble");
     // Nếu là câu xã giao và lỗi mạng, dùng fallback tại chỗ để không hiện Failed to fetch
@@ -1140,10 +1299,11 @@ async function send(){
       }
     }
     if(isNetErr){
-      bubble.innerHTML=`❌ <b>Lỗi kết nối:</b> Không kết nối được máy chủ ở <code>http://localhost:8000</code>. Hãy kiểm tra bạn đang chạy <code>uvicorn backend.app:app --port 8000</code> và Ollama đang chạy.<div class="meta">${escapeHtml(msg)}</div>`;
-    } else {
-      bubble.innerHTML=`❌ <b>Lỗi:</b> ${escapeHtml(msg)}<div class="meta">Kiểm tra Ollama/backend.</div>`;
-    }
+        bubble.innerHTML=`❌ <b>Lỗi kết nối:</b> Không kết nối được máy chủ ở <code>http://localhost:8000</code>. Hãy kiểm tra bạn đang chạy <code>uvicorn backend.app:app --port 8000</code> và Ollama đang chạy.<div class="meta" style="white-space:pre-wrap;word-break:break-word">${escapeHtml(msg.slice(0,800))}</div>`;
+      } else {
+        // Giữ nguyên nội dung lỗi chi tiết để debug, giới hạn 800 ký tự
+        bubble.innerHTML=`❌ <b>Lỗi:</b> <span style="white-space:pre-wrap;word-break:break-word">${escapeHtml(msg.slice(0,1200))}</span><div class="meta">Kiểm tra Ollama/backend. Nếu cần, thử tắt rerank hoặc giảm top_k.</div>`;
+      }
     setStatus("Lỗi");
   }finally{
     isLoading=false; if(sendBtn) sendBtn.disabled=false; if(messages) messages.scrollTop=messages.scrollHeight;

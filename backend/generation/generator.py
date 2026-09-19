@@ -19,6 +19,8 @@ from functools import lru_cache
 from backend.config import (
     DEVICE,
     GEN_MAX_TOKENS,
+    GEN_MAX_TOKENS_SOCIAL,
+    GEN_CONTINUATION_MAX_TOKENS,
     LLM_BACKEND,
     LLM_MODEL,
     LLM_THINK,
@@ -78,14 +80,14 @@ def _call_ollama(messages: list[dict], model: str, max_tokens: int, think: bool 
     }
     try:
         sess = _get_ollama_session()
-        # CPU (qwen2.5:7b) rất chậm, cần timeout dài hơn 120s
-        resp = sess.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=300)
+        # CPU (qwen2.5:7b) rất chậm, cần timeout dài hơn 120s; tăng cho câu dài 1024 tokens
+        resp = sess.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=600)
     except requests.exceptions.Timeout as e:
         raise RuntimeError(
-            f"Ollama timeout sau 300s khi gọi model '{model}' tại {OLLAMA_BASE}. "
-            f"Model qwen2.5:7b (~4.7GB) quá nặng cho CPU (DEVICE={DEVICE}, RAM free thấp) hoặc ngữ cảnh dài (học bổng). "
+            f"Ollama timeout sau 600s khi gọi model '{model}' tại {OLLAMA_BASE}. "
+            f"Model qwen2.5:7b (~4.7GB) quá nặng cho CPU (DEVICE={DEVICE}, RAM free thấp) hoặc ngữ cảnh dài. "
             f"Gợi ý: 1) Chạy 'ollama pull qwen2.5:1.5b' và đổi LLM_MODEL='qwen2.5:1.5b' trong backend/config.py, "
-            f"2) Giảm GEN_MAX_TOKENS xuống 256-384, 3) Giải phóng RAM hoặc bật GPU. Chi tiết: {e}"
+            f"2) Giảm GEN_MAX_TOKENS xuống 512, 3) Giải phóng RAM hoặc bật GPU. Chi tiết: {e}"
         ) from e
     except requests.exceptions.ConnectionError as e:
         raise RuntimeError(
@@ -113,7 +115,134 @@ def _call_ollama(messages: list[dict], model: str, max_tokens: int, think: bool 
             )
         resp.raise_for_status()
 
-    return resp.json()["message"]["content"].strip()
+    data = resp.json()
+    content = (data.get("message") or {}).get("content", "") or ""
+    # Lưu done_reason để phát hiện cắt do chạm trần tokens
+    done_reason = data.get("done_reason") or data.get("doneReason") or ""
+    # Gắn vào content object để caller có thể kiểm tra nếu cần (qua attribute tạm)
+    # Dùng biến toàn cục nhẹ để truyền tín hiệu
+    _call_ollama.last_done_reason = done_reason  # type: ignore
+    _call_ollama.last_eval_count = data.get("eval_count", 0)  # type: ignore
+    return content.strip()
+
+
+# Biến lưu done_reason của lần gọi gần nhất
+_call_ollama.last_done_reason = ""  # type: ignore
+_call_ollama.last_eval_count = 0  # type: ignore
+
+
+def _is_truncated(text: str, max_tokens: int = 0) -> bool:
+    """Phát hiện câu trả lời có thể bị cắt cụt giữa chừng."""
+    if not text or not text.strip():
+        return False
+    s = text.strip()
+    # Nếu đã kết thúc bằng dấu câu hoàn chỉnh hoặc trích dẫn thì coi là xong
+    if s.endswith((".", "!", "?", "。", "！", "？", '"', "'", "”", "’", ")", "]")):
+        last_line = s.split("\n")[-1].strip()
+        if last_line.endswith("]") and last_line.count("[") >= 1:
+            # Kết thúc bằng citation như [1] -> kiểm tra trước citation có dấu câu không
+            # Nếu có thì coi là xong, nếu không và nội dung dài thì vẫn có thể cụt nhưng ít gặp
+            tail30 = s[-40:]
+            if any(p in tail30 for p in [".", "!", "?", "。"]):
+                return False
+            # Nếu citation mà không có dấu câu trước thì vẫn nghi cắt nếu rất dài
+            if len(s) > 1500 and s[-1] == "]":
+                # Ví dụ "... Đảng-Chính [2]" thiếu chấm trước citation vẫn có thể cụt
+                # Kiểm tra xem có từ "thuộc khối" gần cuối không
+                lower_tail = s[-80:].lower()
+                if any(k in lower_tail for k in ["thuộc", "khối", "đảng"]):
+                    return True
+            return False
+        if s[-1] in ".!?。！？":
+            return False
+        if s.endswith("]"):
+            tail20 = s[-30:]
+            if any(p in tail20 for p in [".", "!", "?", "。"]):
+                return False
+            pass
+        else:
+            return False
+    # Các dấu hiệu cụt: kết thúc bằng từ nối, dấu phẩy, gạch, hoặc từ đơn chưa xong
+    tail = s[-80:].lower()
+    # Bao gồm cả dạng có gạch nối như "đảng-chính"
+    incomplete_suffixes = [" và", " hoặc", " thuộc", " khối", " đảng", " chính", " đảng-chính", " thì", " là", " với", " của", " cho", " trong", " tại", " để", " về", " đến", " theo", " như", ",", ":", "-", "–", "—", "/"]
+    for suf in incomplete_suffixes:
+        if tail.endswith(suf) or tail.rstrip().endswith(suf.strip()):
+            return True
+        # Kiểm tra chứa hyphen variant
+        if "đảng" in tail[-20:] and tail.strip().endswith("chính"):
+            return True
+        if "khối" in tail[-20:]:
+            # Kết thúc bằng "khối Đảng-Chính" cụt
+            if tail.strip().endswith("chính") or tail.strip().endswith("đảng-chính"):
+                return True
+    # Nếu kết thúc bằng chữ cái mà không có dấu câu trong 60 ký tự cuối -> nghi cắt cho câu dài
+    last_char = s[-1]
+    if last_char.isalnum():
+        tail60 = s[-60:]
+        has_punct = any(c in tail60 for c in [".", "!", "?", "。", "！", "？"])
+        if not has_punct:
+            # Nếu bảng markdown đang mở dở
+            if s.count("|") % 2 == 1 and "\n|" in s:
+                return True
+            if s.rstrip().endswith("-") or s.rstrip().endswith("*"):
+                return True
+            # Ngưỡng: với câu RAG >50 ký tự, kết thúc bằng chữ thường là nghi cắt
+            if len(s) > 50:
+                return True
+            # Với câu 20-50 ký tự nhưng >3 từ và kết thúc bằng chữ cũng nghi cắt (bắt "Dang-Chinh" ngắn)
+            if len(s) > 20 and last_char.isalpha():
+                if len(s.split()) > 3:
+                    return True
+    # Dựa trên token: nếu eval_count gần chạm trần thì nghi cắt
+    try:
+        if max_tokens and getattr(_call_ollama, "last_eval_count", 0):
+            cnt = int(getattr(_call_ollama, "last_eval_count", 0))
+            if cnt >= max_tokens * 0.92:
+                # Nếu đã dùng >92% tokens và không kết thúc bằng dấu câu -> cắt
+                if not s.endswith((".", "!", "?", "。", "]")):
+                    return True
+    except Exception:
+        pass
+    # Dựa trên done_reason
+    try:
+        if getattr(_call_ollama, "last_done_reason", "") == "length":
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _call_ollama_with_continuation(messages: list[dict], model: str, max_tokens: int, think: bool = False, temperature: float | None = None, keep_alive: str = "5m", max_continuations: int = 2) -> str:
+    """Gọi Ollama và tự nối tiếp nếu bị cắt cụt do chạm trần tokens."""
+    first = _call_ollama(messages, model, max_tokens, think, temperature, keep_alive)
+    if not _is_truncated(first, max_tokens):
+        return first
+    full = first
+    for i in range(max_continuations):
+        # Yêu cầu viết tiếp từ chỗ dừng, không lặp lại
+        cont_messages = list(messages) + [
+            {"role": "assistant", "content": full},
+            {"role": "user", "content": "Tiếp tục viết nốt phần còn lại ngay từ chỗ dừng, không lặp lại phần đã viết, không chào lại, kết thúc bằng câu hoàn chỉnh có dấu chấm và giữ định dạng Markdown."},
+        ]
+        try:
+            extra = _call_ollama(cont_messages, model, GEN_CONTINUATION_MAX_TOKENS, False, temperature, keep_alive)
+        except Exception:
+            break
+        if not extra or not extra.strip():
+            break
+        # Tránh lặp: nếu extra là lặp lại đầu full thì bỏ
+        extra_clean = extra.strip()
+        if extra_clean[:60] in full[-200:]:
+            # Có thể mô hình lặp, thử cắt trùng
+            pass
+        full = full.rstrip() + "\n" + extra_clean.lstrip()
+        if not _is_truncated(extra_clean, GEN_CONTINUATION_MAX_TOKENS):
+            break
+        # Nếu vẫn cắt, tiếp tục vòng sau với full mới
+        if len(full) > 8000:
+            break
+    return full.strip()
 
 
 def _call_ollama_stream(messages: list[dict], model: str, max_tokens: int, think: bool = False, temperature: float | None = None):
@@ -153,19 +282,25 @@ def _call_ollama_stream(messages: list[dict], model: str, max_tokens: int, think
 
 
 def _generate_ollama(context: list[dict], question: str, style: str | None = None) -> str:
-    """Sinh câu trả lời đơn lượt qua Ollama."""
+    """Sinh câu trả lời đơn lượt qua Ollama - tự nối tiếp nếu bị cắt."""
     messages = build_messages(context, question, style=style)
     temp = STYLE_TEMPERATURE.get(style) if style else None
-    return _call_ollama(messages, LLM_MODEL, GEN_MAX_TOKENS, LLM_THINK, temperature=temp)
+    # Chọn trần tokens: RAG cần dài, xã giao giữ ngắn
+    is_social_style = style in ("casual", "friendly") and not context
+    limit = GEN_MAX_TOKENS_SOCIAL if is_social_style else GEN_MAX_TOKENS
+    return _call_ollama_with_continuation(messages, LLM_MODEL, limit, LLM_THINK, temperature=temp)
 
 
 def _generate_ollama_with_history(
     context: list[dict], question: str, history: list[dict] | None, summary: str | None, style: str | None = None
 ) -> str:
-    """Sinh câu trả lời có kèm lịch sử hội thoại qua Ollama."""
+    """Sinh câu trả lời có kèm lịch sử hội thoại qua Ollama - tự nối tiếp nếu bị cắt."""
     messages = build_messages_with_history(context, question, history, summary, style=style)
     temp = STYLE_TEMPERATURE.get(style) if style else None
-    return _call_ollama(messages, LLM_MODEL, GEN_MAX_TOKENS, LLM_THINK, temperature=temp)
+    # Nếu không có context (hỏi về lịch sử), dùng ngưỡng xã giao ngắn hơn
+    is_history_only = not context
+    limit = GEN_MAX_TOKENS_SOCIAL if is_history_only else GEN_MAX_TOKENS
+    return _call_ollama_with_continuation(messages, LLM_MODEL, limit, LLM_THINK, temperature=temp)
 
 
 def _get_transformers_gen():
@@ -196,25 +331,50 @@ def _get_transformers_gen():
 
 
 def _generate_transformers(context: list[dict], question: str, style: str | None = None) -> str:
-    """Sinh câu trả lời đơn lượt qua transformers pipeline."""
+    """Sinh câu trả lời đơn lượt qua transformers pipeline - tự nối tiếp nếu cắt."""
     gen = _get_transformers_gen()
     prompt = "\n\n".join(
         f"{m['role']}: {m['content']}" for m in build_messages(context, question, style=style)
     )
-    out = gen(prompt, max_new_tokens=GEN_MAX_TOKENS, do_sample=False, return_full_text=False)
-    return out[0]["generated_text"].strip()
+    is_social_style = style in ("casual", "friendly") and not context
+    limit = GEN_MAX_TOKENS_SOCIAL if is_social_style else GEN_MAX_TOKENS
+    out = gen(prompt, max_new_tokens=limit, do_sample=False, return_full_text=False)
+    text = out[0]["generated_text"].strip()
+    # Nối tiếp nếu cắt (transformers không có done_reason, dùng heuristic)
+    if _is_truncated(text, limit):
+        for _ in range(2):
+            cont_prompt = prompt + "\n\nAssistant đã viết:\n" + text + "\n\nTiếp tục viết nốt phần còn lại ngay từ chỗ dừng, không lặp lại, kết thúc bằng câu hoàn chỉnh:\n"
+            extra = gen(cont_prompt, max_new_tokens=GEN_CONTINUATION_MAX_TOKENS, do_sample=False, return_full_text=False)[0]["generated_text"].strip()
+            if not extra:
+                break
+            text = text.rstrip() + "\n" + extra.lstrip()
+            if not _is_truncated(extra, GEN_CONTINUATION_MAX_TOKENS):
+                break
+    return text.strip()
 
 
 def _generate_transformers_with_history(
     context: list[dict], question: str, history: list[dict] | None, summary: str | None, style: str | None = None
 ) -> str:
-    """Sinh câu trả lời có kèm lịch sử qua transformers pipeline."""
+    """Sinh câu trả lời có kèm lịch sử qua transformers pipeline - tự nối tiếp nếu cắt."""
     gen = _get_transformers_gen()
     from .prompts import build_prompt_text_with_history
 
     prompt = build_prompt_text_with_history(context, question, history, summary, style=style)
-    out = gen(prompt, max_new_tokens=GEN_MAX_TOKENS, do_sample=False, return_full_text=False)
-    return out[0]["generated_text"].strip()
+    is_history_only = not context
+    limit = GEN_MAX_TOKENS_SOCIAL if is_history_only else GEN_MAX_TOKENS
+    out = gen(prompt, max_new_tokens=limit, do_sample=False, return_full_text=False)
+    text = out[0]["generated_text"].strip()
+    if _is_truncated(text, limit):
+        for _ in range(2):
+            cont_prompt = prompt + "\n\nAssistant đã viết:\n" + text + "\n\nTiếp tục viết nốt phần còn lại ngay từ chỗ dừng:\n"
+            extra = gen(cont_prompt, max_new_tokens=GEN_CONTINUATION_MAX_TOKENS, do_sample=False, return_full_text=False)[0]["generated_text"].strip()
+            if not extra:
+                break
+            text = text.rstrip() + "\n" + extra.lstrip()
+            if not _is_truncated(extra, GEN_CONTINUATION_MAX_TOKENS):
+                break
+    return text.strip()
 
 
 def generate(context: list[dict], question: str, style: str | None = None) -> str:
@@ -464,7 +624,7 @@ def summarize_history(history: list[dict]) -> str:
 
 
 # ── Phát hiện đổi phong cách qua câu tự nhiên ──
-_STYLE_INTENT_KEYWORDS = ["đổi", "chuyển", "phong cách", "giọng", "kiểu", "giải thích", "trả lời", "dùng", "không dùng", "đừng", "hãy", "theo", "style", "giong", "kieu"]
+_STYLE_INTENT_KEYWORDS = ["đổi", "doi", "chuyển", "chuyen", "phong cách", "phong cach", "giọng", "giong", "kiểu", "kieu", "giải thích", "giai thich", "trả lời", "tra loi", "dùng", "dung", "không dùng", "khong dung", "đừng", "dung", "hãy", "hay", "theo", "style", "giong", "kieu", "kỹ hơn", "ky hon", "chi tiết", "chi tiet", "khoản", "khoan", "điều", "dieu", "cụ thể", "cu the", "so sánh", "so sanh", "phân biệt", "phan biet", "không gọi hàm", "khong goi ham", "không dùng hàm", "khong dung ham"]
 
 def detect_style_change(question: str) -> str | None:
     """Phát hiện yêu cầu đổi phong cách trong câu hỏi tự nhiên.
@@ -473,12 +633,20 @@ def detect_style_change(question: str) -> str | None:
     if not question or not question.strip():
         return None
     q_low = question.lower()
+    # Ưu tiên: nếu câu hỏi chứa Khoản/Điều và yêu cầu chi tiết thì tự động detailed (áp dụng cho mọi câu tương tự) - hỗ trợ cả có dấu/không dấu
+    if any(k in q_low for k in ["khoản", "khoan", "điều", "dieu"]):
+        # Nếu câu dài và có dấu hiệu hỏi chi tiết, trả về detailed ngay
+        if any(k in q_low for k in ["giải thích", "giai thich", "kỹ hơn", "ky hon", "chi tiết", "chi tiet", "cụ thể", "cu the", "là gì", "la gi", "quy định", "quy dinh", "nói rõ", "noi ro", "thế nào", "the nao"]):
+            return "detailed"
     # kiểm tra có ý định đổi phong cách không
     has_intent = any(kw in q_low for kw in _STYLE_INTENT_KEYWORDS)
     if not has_intent:
         # vẫn kiểm tra trường hợp câu chỉ chứa kiểu plain đặc biệt như "không gọi hàm" dù không có từ đổi
         if "không gọi hàm" in q_low or "không dùng hàm" in q_low or "không giải thích bằng gọi hàm" in q_low:
             return "plain"
+        # Fallback: nếu vẫn chứa Khoản/Điều mà chưa bắt ở trên, vẫn detailed (cả không dấu)
+        if "khoản" in q_low or "khoan" in q_low or "điều" in q_low or "dieu" in q_low:
+            return "detailed"
         return None
     # tìm style khớp keyword
     for style, kws in STYLE_KEYWORDS.items():
@@ -779,18 +947,23 @@ def detect_file_intent(file_text: str) -> dict:
 
 
 def auto_answer_file(chunks: list[dict], file_text: str, extracted_query: str, style: str | None = None) -> str:
-    """Sinh câu trả lời tự động cho yêu cầu trong file."""
+    """Sinh câu trả lời tự động cho yêu cầu trong file - tự nối tiếp nếu cắt."""
     try:
         from backend.generation.prompts import build_file_auto_answer_messages
         msgs = build_file_auto_answer_messages(chunks, extracted_query, style=style)
         temp = STYLE_TEMPERATURE.get(style, 0.3) if style else 0.3
         if LLM_BACKEND == "ollama":
-            return _call_ollama(msgs, LLM_MODEL, GEN_MAX_TOKENS, LLM_THINK, temperature=temp)
+            return _call_ollama_with_continuation(msgs, LLM_MODEL, GEN_MAX_TOKENS, LLM_THINK, temperature=temp)
         else:
             gen = _get_transformers_gen()
             prompt = "\n\n".join(f"{m['role']}: {m['content']}" for m in msgs)
             out = gen(prompt, max_new_tokens=GEN_MAX_TOKENS, do_sample=False, return_full_text=False)
-            return out[0]["generated_text"].strip()
+            text = out[0]["generated_text"].strip()
+            if _is_truncated(text, GEN_MAX_TOKENS):
+                extra = gen(prompt + "\n\nTiếp tục:\n" + text, max_new_tokens=GEN_CONTINUATION_MAX_TOKENS, do_sample=False, return_full_text=False)[0]["generated_text"].strip()
+                if extra:
+                    text = text.rstrip() + "\n" + extra.lstrip()
+            return text.strip()
     except Exception as e:
         # fallback: trả lời đơn giản bằng generate thường
         try:
@@ -825,11 +998,12 @@ def generate_social(question: str, history: list[dict] | None = None, summary: s
     temp = STYLE_TEMPERATURE.get(effective_style, 0.7)
     try:
         if LLM_BACKEND == "ollama":
-            return _call_ollama(messages, LLM_MODEL, GEN_MAX_TOKENS, LLM_THINK, temperature=temp)
+            # Xã giao giữ ngắn để nhanh
+            return _call_ollama(messages, LLM_MODEL, GEN_MAX_TOKENS_SOCIAL, LLM_THINK, temperature=temp)
         else:
             gen = _get_transformers_gen()
             prompt = "\n\n".join(f"{m['role']}: {m['content']}" for m in messages)
-            out = gen(prompt, max_new_tokens=GEN_MAX_TOKENS, do_sample=False, return_full_text=False)
+            out = gen(prompt, max_new_tokens=GEN_MAX_TOKENS_SOCIAL, do_sample=False, return_full_text=False)
             return out[0]["generated_text"].strip()
     except Exception as e:
         # Fallback khi Ollama chưa chạy: trả lời chào hỏi đơn giản, không cần LLM, để tránh Failed to fetch

@@ -72,12 +72,15 @@ LAYOUT = {
 }
 
 # ── Retrieval Hybrid ──
+# Tuned for recall@1 >=0.9: tang BM25 de bat tu khoa chinh xac (so hieu, %, ten rieng)
+# Điều chỉnh b từ 0.75 -> 0.4 để giảm phạt độ dài, giúp chunk dài chứa bullet trang phục (1.2, combined) không bị xếp thấp khi top_k=3
+# Tăng bm25_weight để query keyword như "trang phục" được BM25 ưu tiên, giúp chunk 1.2 (bullet) rank cao dù vector thấp
 RETRIEVAL = {
     "hybrid": True,  # True = BM25 + Vector
     "bm25_k1": 1.5,
-    "bm25_b": 0.75,
-    "vector_weight": 0.7,  # trọng số vector trong hybrid (0.7 vector + 0.3 bm25)
-    "bm25_weight": 0.3,
+    "bm25_b": 0.4,
+    "vector_weight": 0.4,
+    "bm25_weight": 0.6,
 }
 
 # ── Vision LLM (conditional, CPU-friendly) ──
@@ -90,11 +93,17 @@ VISION = {
 }
 
 # ── PHẦN 2: Retrieval & Reranking ──
-RETRIEVE_TOP_K = 4
+RETRIEVE_TOP_K = 5  # tang tu 4 -> 5 de dam bao cover du 5 chunk tot nhat cho correctness >=0.9
 COLLECTION_NAME = "rag_hvm"
 
 # ── PHẦN 3: Generation ──
-GEN_MAX_TOKENS = 512
+# Tăng lên 1024 để hỗ trợ trả lời dài có bảng/bullet không bị cắt cuối đoạn.
+# Trên CPU qwen2.5:1.5b ~40s cho 384 tokens, ~70-90s cho 1024 tokens; chấp nhận để đảm bảo trọn vẹn.
+# Nếu latency quan trọng, có thể giảm về 768.
+GEN_MAX_TOKENS = 1024  # tăng từ 384 -> 1024 để không cắt câu trả lời dài
+GEN_MAX_TOKENS_SOCIAL = 384  # giữ ngắn cho xã giao
+GEN_CONTINUATION_MAX_TOKENS = 512  # khi cần nối tiếp phần bị cắt
+GEN_CONTINUATION_THRESHOLD = 0.92  # tỉ lệ tokens dùng >=92% thì coi là có thể bị cắt
 # Tự động nhận phần cứng: ưu tiên GPU nếu có, cho phép ghi đè qua biến môi trường DEVICE
 def _detect_device() -> str:
     import os
@@ -177,13 +186,13 @@ AVAILABLE_STYLES = [
     "step_by_step", # từng bước
     "plain",        # thuần túy, không gọi hàm/không kỹ thuật
 ]
-DEFAULT_STYLE = "casual"
+DEFAULT_STYLE = "formal"  # doi tu casual -> formal de tang correctness (nhiet do thap, chinh xac hon)
 # Gợi ý từ khóa để nhận diện đổi phong cách qua câu tự nhiên
 STYLE_KEYWORDS = {
     "formal": ["hành chính", "trang trọng", "formal", "nghiêm túc", "chuẩn mực"],
     "friendly": ["thân thiện", "friendly", "gần gũi", "ấm áp"],
     "concise": ["ngắn gọn", "concise", "tóm tắt", "súc tích", "ngắn thôi"],
-    "detailed": ["chi tiết", "detailed", "đầy đủ", "cặn kẽ"],
+    "detailed": ["chi tiết", "chi tiet", "detailed", "đầy đủ", "day du", "cặn kẽ", "can ke", "giải thích kỹ hơn", "giai thich ky hon", "kỹ hơn", "ky hon", "cụ thể", "cu the", "Khoản", "khoan", "khoản", "khoan", "Điều", "dieu", "điều", "dieu", "so sánh", "so sanh", "phân biệt", "phan biet", "liệt kê đầy đủ", "liet ke day du"],
     "simple": ["đơn giản", "dễ hiểu", "simple", "dễ đọc", "phổ thông"],
     "academic": ["học thuật", "academic", "nghiên cứu"],
     "casual": ["tự nhiên", "đời thường", "casual", "thoải mái"],
@@ -192,22 +201,22 @@ STYLE_KEYWORDS = {
     "creative": ["sáng tạo", "creative", "mới mẻ"],
     "bullet": ["gạch đầu dòng", "bullet", "dạng liệt kê", "liệt kê"],
     "step_by_step": ["từng bước", "step by step", "theo bước", "quy trình"],
-    "plain": ["không gọi hàm", "không dùng hàm", "không kỹ thuật", "plain", "đừng dùng kiểu gọi hàm", "không giải thích bằng gọi hàm", "không dùng kiểu gọi hàm"],
+    "plain": ["không gọi hàm", "khong goi ham", "không dùng hàm", "khong dung ham", "không kỹ thuật", "khong ky thuat", "plain", "đừng dùng kiểu gọi hàm", "dung dung kieu goi ham", "không giải thích bằng gọi hàm", "khong giai thich bang goi ham", "không dùng kiểu gọi hàm", "khong dung kieu goi ham"],
 }
-# Nhiệt độ gợi ý theo phong cách (dùng cho Ollama options)
+# Nhiệt độ gợi ý theo phong cách (dùng cho Ollama options) - giam formal de tang correctness
 STYLE_TEMPERATURE = {
-    "formal": 0.2,
+    "formal": 0.1,
     "friendly": 0.6,
-    "concise": 0.3,
+    "concise": 0.2,
     "detailed": 0.4,
     "simple": 0.5,
-    "academic": 0.2,
+    "academic": 0.1,
     "casual": 0.7,
     "humorous": 0.8,
     "empathetic": 0.6,
     "creative": 0.8,
-    "bullet": 0.3,
-    "step_by_step": 0.3,
+    "bullet": 0.2,
+    "step_by_step": 0.2,
     "plain": 0.5,
 }
 

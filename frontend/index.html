@@ -9,6 +9,8 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
 </head>
 <body>
   <div class="app-shell">
@@ -27,7 +29,7 @@
       </div>
     </aside>
     <main class="main-panel">
-      <header class="topbar"><div class="topbar-left"><button class="icon-btn mobile" id="open-sidebar" title="Mở thanh bên"><i class="fa-solid fa-bars"></i></button><div class="workspace-title"><span class="eyebrow">Không gian hỏi đáp</span><strong>Trợ lý học viện</strong></div></div><div class="topbar-actions"><span class="secure-label"><i class="fa-solid fa-shield-halved"></i> Dữ liệu nội bộ</span><a class="icon-btn" href="/docs" target="_blank" title="API Docs"><i class="fa-solid fa-code"></i></a><a class="icon-btn" href="/api/health" target="_blank" title="Trạng thái hệ thống"><i class="fa-solid fa-heart-pulse"></i></a></div></header>
+      <header class="topbar"><div class="topbar-left"><button class="icon-btn mobile" id="open-sidebar" title="Mở thanh bên"><i class="fa-solid fa-bars"></i></button><div class="workspace-title"><span class="eyebrow">Không gian hỏi đáp</span><strong>Trợ lý học viện</strong></div></div><div class="topbar-actions"><span class="secure-label"><i class="fa-solid fa-shield-halved"></i> Dữ liệu nội bộ</span><a class="icon-btn" href="/docs" target="_blank" title="API Docs"><i class="fa-solid fa-code"></i></a><a class="icon-btn" href="/api/health" target="_blank" title="Trạng thái hệ thống"><i class="fa-solid fa-heart-pulse"></i></a><button class="icon-btn" id="toggle-sources" title="Nguồn tham khảo"><i class="fa-solid fa-book-open"></i></button></div></header>
       <section class="chat-stage">
         <div id="messages" class="messages">
           <div class="welcome" id="welcome"><div class="welcome-kicker"><span class="pulse-dot"></span> Sẵn sàng hỗ trợ</div><h1>Hôm nay bạn muốn<br><em>tìm hiểu điều gì?</em></h1><p>Tra cứu quy chế, quy định và thông báo của Học viện bằng ngôn ngữ tự nhiên.</p><div class="examples">
@@ -43,6 +45,7 @@
     </main>
     <aside class="sources-panel" id="right-panel"><div class="panel-header"><div><span class="eyebrow">Tài liệu tham chiếu</span><h2><i class="fa-solid fa-link"></i> Nguồn trả lời</h2></div><button class="icon-btn" id="close-right" title="Đóng nguồn"><i class="fa-solid fa-xmark"></i></button></div><div id="sources" class="sources-list"><div class="empty-panel"><i class="fa-regular fa-file-lines"></i><p>Nguồn tham khảo sẽ xuất hiện ở đây sau mỗi câu hỏi.</p></div></div><div id="rewrite-info" class="hint hidden"></div><div id="summary-info" class="hint hidden"></div><div id="context" class="context-wrap hidden"><h4>Ngữ cảnh đã chọn</h4><div id="context-list"></div></div></aside>
   </div>
+  <div id="sources-backdrop" class="sources-backdrop hidden"></div>
   <dialog id="stats-modal"><form method="dialog"><div class="dialog-title"><span class="example-icon blue"><i class="fa-solid fa-chart-simple"></i></span><h3>Thống kê hệ thống</h3></div><pre id="stats-pre">Đang tải...</pre><button class="btn">Đóng</button></form></dialog>
   <script src="app.js?v=20260912"></script>
 </body>
