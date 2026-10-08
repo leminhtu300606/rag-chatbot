@@ -486,11 +486,15 @@ def _get_stats():
         from backend.preprocessing.storage import get_processed_files, count_chunks
         from backend.indexing.vectorstore import count as vec_count, get_stats as vec_stats
         files = get_processed_files()
+        _n = vec_count()
+        _st = vec_stats()
         return {
             "processed_files": len(files),
             "total_chunks": count_chunks(),
-            "chroma_count": vec_count(),
-            "chroma_stats": vec_stats(),
+            "chroma_count": _n,
+            "vector_count": _n,
+            "chroma_stats": _st,
+            "vector_stats": _st,
             "embed_model": cfg.EMBED_MODEL,
             "device": getattr(cfg, "DEVICE", "cpu"),
             "use_gpu": getattr(cfg, "USE_GPU", False),
@@ -559,6 +563,7 @@ async def health():
         out = {
             "status": "ready" if ready else "not_ready",
             "chroma_count": c,
+            "vector_count": c,
             "processed_files": len(files),
             "message": "OK" if ready else "Chua co data. Hay chay: python -m backend.cli clean && python -m backend.cli index --rebuild",
             "auth_enabled": bool(cfg.AUTH_ENABLED),
@@ -919,20 +924,12 @@ async def delete_upload_file(session_id: str, filename: str, user: Dict = Depend
     if not safe_name:
         raise HTTPException(status_code=400, detail="Tên file không hợp lệ")
     try:
-        from backend.indexing.vectorstore import get_collection
-        col = get_collection()
+        from backend.indexing.vectorstore import delete_chunks
         # Xóa vector theo filename + session_id
         try:
-            col.delete(where={"$and": [{"session_id": session_id}, {"filename": safe_name}]})
+            delete_chunks(session_id, safe_name)
         except Exception:
-            # fallback
-            try:
-                res = col.get(where={"session_id": session_id}, include=["metadatas"])
-                ids = [res["ids"][i] for i, m in enumerate(res.get("metadatas", [])) if m and m.get("filename") == safe_name]
-                if ids:
-                    col.delete(ids=ids)
-            except Exception as e2:
-                print(f"[upload] delete fallback lỗi: {e2}")
+            pass
         # Xóa file đĩa
         up_path = cfg.UPLOAD_DIR / session_id / safe_name
         if up_path.exists():
@@ -1778,7 +1775,7 @@ async def chat_stream(req: ChatRequest, request: Request, user: Dict = Depends(r
             async def _simple_gen():
                 import json as _j
                 yield f"data: {_j.dumps({'token': res.answer}, ensure_ascii=False)}\n\n"
-                yield f"data: {_j.dumps({'done': True, 'answer': res.answer, 'session_id': res.session_id}, ensure_ascii=False)}\n\n"
+                yield f"data: {_j.dumps({'done': True, 'answer': res.answer, 'session_id': res.session_id, 'sources': list(getattr(res, 'sources', []) or []), 'standalone_question': getattr(res, 'standalone_question', None), 'summary': getattr(res, 'summary', None), 'style': getattr(res, 'style', None), 'math_result': getattr(res, 'math_result', None), 'math_expression': getattr(res, 'math_expression', None), 'is_social': bool(getattr(res, 'is_social', False)), 'needs_clarification': bool(getattr(res, 'needs_clarification', False)), 'clarify_reason': getattr(res, 'clarify_reason', None)}, ensure_ascii=False)}\n\n"
             return StreamingResponse(_simple_gen(), media_type="text/event-stream")
         # Với RAG cần stream từ Ollama
         # Chuẩn bị history/session như chat thường (rút gọn)
@@ -1794,55 +1791,208 @@ async def chat_stream(req: ChatRequest, request: Request, user: Dict = Depends(r
         elif req.history:
             eff_hist = [{"role": m.role, "content": m.content} for m in req.history]
 
-        from backend.generation.rag import answer_with_history, answer
-        from backend.generation.generator import _call_ollama_stream
-        from backend.indexing.retrieval import retrieve
-        from backend.generation.reranker import rerank
-        from backend.generation.generator import rewrite_query
+        from backend.generation.rag import (
+            _do_retrieve, _ensure_trang_phuc_coverage, _prepare_history as _prep,
+        )
+        from backend.generation.generator import _call_ollama_stream, rewrite_query, detect_style_change
+        from backend.generation.reranker import rerank, DEFAULT_RERANK_TOP_K
         from backend.generation.prompts import build_messages_with_history, build_messages
         from backend.config.settings import RETRIEVE_TOP_K
+        from backend.common.utils import deduplicate_docs
+        from backend.infra import cache as _cache
 
-        # Chuẩn bị context nhanh
+        # Giải session/style/history giống _chat_impl (frontend luôn use_history=true).
+        # Stream single-pass: không agent retry để time bounded.
+        style = effective_style
+        if not (req.style and req.style.strip().lower() in cfg.AVAILABLE_STYLES):
+            try:
+                _det = detect_style_change(req.question)
+                if _det:
+                    style = _det
+            except Exception:
+                pass
+        use_hist = req.use_history and (req.history or req.session_id)
+        sid = req.session_id.strip() if req.session_id and req.session_id.strip() else None
+        eff_hist = None
+        if use_hist:
+            if sid:
+                sid = _get_or_create_session(sid, style=style)
+                with _sessions_lock:
+                    _sh = list(_sessions[sid]["history"]) if sid in _sessions else []
+                    _ss = _sessions[sid].get("style", style) if sid in _sessions else style
+                if style and _ss != style:
+                    with _sessions_lock:
+                        if sid in _sessions:
+                            _sessions[sid]["style"] = style
+                            _sessions[sid]["updated_at"] = time.time()
+                    _save_sessions()
+                else:
+                    style = _ss or style
+                if _sh:
+                    eff_hist = _sh
+                elif req.history:
+                    _ch = [{"role": m.role, "content": m.content} for m in req.history]
+                    eff_hist = _ch or None
+                    if _ch:
+                        with _sessions_lock:
+                            if sid in _sessions:
+                                _sessions[sid]["history"] = _ch
+                                _sessions[sid]["updated_at"] = time.time()
+                        _save_sessions()
+            elif req.history:
+                _ch = [{"role": m.role, "content": m.content} for m in req.history]
+                sid = _get_or_create_session(None, style=style)
+                eff_hist = _ch or None
+                if _ch:
+                    with _sessions_lock:
+                        if sid in _sessions:
+                            _sessions[sid]["history"] = _ch
+                            _sessions[sid]["updated_at"] = time.time()
+                    _save_sessions()
+            else:
+                sid = _get_or_create_session(None, style=style)
+        elif sid:
+            _get_or_create_session(sid, style=style)
+        if not style:
+            style = cfg.DEFAULT_STYLE
+
+        # Chuẩn bị context nhanh (single-pass)
         async def _gen():
             import json as _j
+
+            def _status(msg: str) -> str:
+                return f"data: {_j.dumps({'status': msg}, ensure_ascii=False)}\n\n"
+
+            def _done(payload: dict) -> str:
+                return f"data: {_j.dumps({'done': True, **payload}, ensure_ascii=False)}\n\n"
+
             try:
-                # Lấy context
+                # (0) Cache: câu đơn lượt giống hệt -> trả ngay từng đoạn
+                ckey = _cacheable(req)
+                if ckey:
+                    hit = _cache.get(ckey)
+                    if hit is not None:
+                        _log_chat(user, req, hit, time.time() - t0, stream=True)
+                        _ans = getattr(hit, "answer", "") or ""
+                        for i in range(0, len(_ans), 200):
+                            yield f"data: {_j.dumps({'token': _ans[i:i + 200]}, ensure_ascii=False)}\n\n"
+                        yield _done({
+                            "answer": _ans,
+                            "sources": list(getattr(hit, "sources", []) or []),
+                            "standalone_question": getattr(hit, "standalone_question", None),
+                            "summary": getattr(hit, "summary", None),
+                            "session_id": getattr(hit, "session_id", None),
+                            "style": getattr(hit, "style", None),
+                        })
+                        return
+                # (1) Viết lại câu hỏi cho retrieval
+                yield _status("Đang hiểu câu hỏi...")
                 standalone_q = req.question
                 if eff_hist:
                     try:
                         standalone_q = await run_in_threadpool(lambda: rewrite_query(req.question, eff_hist))
                     except Exception:
                         pass
-                fetch_k = (req.top_k or RETRIEVE_TOP_K) * 3 if req.use_rerank else (req.top_k or RETRIEVE_TOP_K)
-                ctx = await run_in_threadpool(lambda: retrieve(standalone_q, category=req.category, top_k=fetch_k, session_id=session_id))
+                # (2) Retrieve hybrid + dedup (ngang /api/chat)
+                yield _status("Đang tìm tài liệu...")
+                _top = req.top_k or (DEFAULT_RERANK_TOP_K if req.use_rerank else RETRIEVE_TOP_K)
+                fetch_k = min(_top * 5, 15) if req.use_rerank else _top
+                validate_tool_call("retrieve", {"category": req.category, "top_k": _top})
+                ctx = await run_in_threadpool(lambda: _do_retrieve(standalone_q, category=req.category, top_k=fetch_k, session_id=sid))
+                ctx = _ensure_trang_phuc_coverage(standalone_q, ctx)
+                try:
+                    ctx = deduplicate_docs(ctx, threshold=0.92)
+                except Exception:
+                    pass
+                if not ctx:
+                    from backend.generation.rag import _make_clarification
+                    clar = validate_output(_make_clarification(req.question, style=style) + " (Hiện mình chưa tìm thấy tài liệu nào khớp với câu hỏi này, bạn có thể cho thêm chi tiết được không?)")
+                    if sid:
+                        try:
+                            _append_to_session(sid, sanitize_input(req.question, max_len=2000), clar, style=style, last_math_result=None)
+                        except Exception:
+                            pass
+                    for i in range(0, len(clar), 200):
+                        yield f"data: {_j.dumps({'token': clar[i:i + 200]}, ensure_ascii=False)}\n\n"
+                    yield _done({
+                        "answer": clar, "sources": [], "standalone_question": standalone_q,
+                        "summary": None, "session_id": sid, "style": style,
+                        "needs_clarification": True, "clarify_reason": "no_context",
+                    })
+                    return
+                # (3) Rerank
                 if req.use_rerank and ctx:
-                    ctx = await run_in_threadpool(lambda: rerank(standalone_q, ctx, top_k=req.top_k or RETRIEVE_TOP_K))
-                # Build messages
+                    yield _status("Đang xếp hạng tài liệu...")
+                    ctx = await run_in_threadpool(lambda: rerank(standalone_q, ctx, top_k=_top))
+                sources = [c.get("metadata", {}) for c in ctx]
+                # (4) Dựng messages (kèm cửa sổ lịch sử + tóm tắt như /api/chat)
+                hist_win, summ = None, None
                 if eff_hist:
-                    from backend.generation.rag import _prepare_history as _prep
                     hist_win, summ = await run_in_threadpool(lambda: _prep(eff_hist))
-                    messages = build_messages_with_history(ctx, req.question, hist_win, summ, style=effective_style)
+                    messages = build_messages_with_history(ctx, req.question, hist_win, summ, style=style)
                 else:
-                    messages = build_messages(ctx, req.question, style=effective_style)
-                # Stream từ Ollama - output validation từng token đã bọc, full sẽ được kiểm tra
+                    messages = build_messages(ctx, req.question, style=style)
+                # (5) Stream từng token từ Ollama trên thread riêng để không chặn event loop
+                yield _status("Đang sinh câu trả lời...")
+                import queue as _queue
+                import threading as _threading
+                _tok_q: _queue.Queue = _queue.Queue()
+                _END = object()
+
+                def _pump():
+                    try:
+                        for _tok in _call_ollama_stream(messages, cfg.LLM_MODEL, cfg.GEN_MAX_TOKENS, cfg.LLM_THINK):
+                            _tok_q.put(_tok)
+                    except Exception as _pe:
+                        _tok_q.put(_pe)
+                    finally:
+                        _tok_q.put(_END)
+
+                _th = _threading.Thread(target=_pump, daemon=True)
+                _th.start()
                 full = ""
-                for token in _call_ollama_stream(messages, cfg.LLM_MODEL, cfg.GEN_MAX_TOKENS, cfg.LLM_THINK):
+                _n_tokens = 0
+                while True:
+                    item = await run_in_threadpool(_tok_q.get)
+                    if item is _END:
+                        break
+                    if isinstance(item, Exception):
+                        raise item
                     # Loại bỏ delimiter giả mạo trong token streaming
-                    token_safe = token.replace("<<<UNTRUSTED_DATA>>>", "").replace("<<<END_UNTRUSTED_DATA>>>", "")
+                    token_safe = item.replace("<<<UNTRUSTED_DATA>>>", "").replace("<<<END_UNTRUSTED_DATA>>>", "")
+                    if not token_safe:
+                        continue
                     full += token_safe
+                    _n_tokens += 1
+                    if _n_tokens % 25 == 0 and await request.is_disconnected():
+                        break
                     yield f"data: {_j.dumps({'token': token_safe}, ensure_ascii=False)}\n\n"
                 # Output validation cho toàn bộ trước khi lưu
                 try:
                     full = validate_output(full)
+                    sources = validate_sources(sources)
                 except Exception:
                     pass
                 # Lưu session sau khi xong (đã validated)
-                if session_id:
+                if sid:
                     try:
-                        _append_to_session(session_id, sanitize_input(req.question, max_len=2000), full, style=effective_style)
+                        _append_to_session(sid, sanitize_input(req.question, max_len=2000), full, summary=summ, style=style)
                     except Exception:
                         pass
-                yield f"data: {_j.dumps({'done': True, 'answer': full, 'session_id': session_id}, ensure_ascii=False)}\n\n"
+                resp_obj = ChatResponse(
+                    answer=full, sources=sources, context=None, session_id=sid,
+                    standalone_question=standalone_q, summary=summ, style=style,
+                )
+                if ckey and sources:
+                    try:
+                        _cache.put(ckey, resp_obj)
+                    except Exception:
+                        pass
+                _log_chat(user, req, resp_obj, time.time() - t0, stream=True)
+                yield _done({
+                    "answer": full, "sources": sources, "standalone_question": standalone_q,
+                    "summary": summ, "session_id": sid, "style": style,
+                })
             except Exception as e:
                 import json as _j2
                 yield f"data: {_j2.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"
@@ -1862,8 +2012,10 @@ async def trigger_clean():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# Mount frontend static files if exists (phuc vu giao dien)
-frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend"
+# Mount frontend: ưu tiên bản build React+Vite (frontend/dist), fallback thư mục frontend/
+_frontend_root = Path(__file__).resolve().parent.parent.parent / "frontend"
+_dist_dir = _frontend_root / "dist"
+frontend_dir = _dist_dir if (_dist_dir / "index.html").exists() else _frontend_root
 if frontend_dir.exists():
     # Luon doc index.html hien tai va khong de trinh duyet giu giao dien cu.
     @app.get("/", include_in_schema=False)
