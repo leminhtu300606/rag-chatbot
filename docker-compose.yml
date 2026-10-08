@@ -1,0 +1,55 @@
+# RAG Chatbot - production stack (server nội bộ, <20 user)
+# Chạy:  cp .env.example .env   (sửa ADMIN_PASSWORD, OLLAMA model...)
+#        docker compose up -d --build
+#        docker compose exec ollama ollama pull ${LLM_MODEL:-qwen2.5:1.5b}
+services:
+  app:
+    build: .
+    image: rag-chatbot:latest
+    env_file: .env
+    environment:
+      OLLAMA_BASE: http://ollama:11434
+    ports:
+      - "127.0.0.1:8000:8000"   # chỉ loopback; ra ngoài qua nginx
+    volumes:
+      - chroma_data:/app/chroma_db
+      - app_data:/app/data
+      - ./data/classified:/app/data/classified:ro
+    depends_on:
+      ollama:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=8)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+    restart: unless-stopped
+
+  # Reverse proxy + TLS nội bộ (bật khi có cert):
+  # docker compose --profile edge up -d
+  nginx:
+    image: nginx:1.27-alpine
+    profiles: ["edge"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  chroma_data:
+  app_data:
+  ollama_data:

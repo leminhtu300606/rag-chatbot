@@ -6,7 +6,7 @@ Bien cac chunk da tien xu ly thanh vector va luu vao Vector Store, ho tro truy x
 Cau truc:
 - embedder.py      : tao embedding tieng Viet (dangvantuan/vietnamese-embedding)
 - vectorstore.py   : luu/truy van ChromaDB + helpers peek/get_stats
-- retriever.py     : truy xuat top-k chunk lien quan
+- retrieval.py     : cum truy xuat top-k (vector + BM25 + hybrid trong 1 file)
 - (logic build)    : da chuyen ra backend/index.py (truoc la build_index.py) - embed + upsert parquet -> Chroma (incremental + --rebuild)
 
 Reranker da chuyen han sang backend/generation/reranker.py (generation lo cham diem cho prompt).
@@ -30,7 +30,7 @@ __all__ = [
 
 def __getattr__(name):
     if name == "retrieve":
-        from .retriever import retrieve
+        from .retrieval import retrieve
         return retrieve
     if name in ("rerank", "RERANK_MODEL"):
         from backend.generation.reranker import RERANK_MODEL, rerank

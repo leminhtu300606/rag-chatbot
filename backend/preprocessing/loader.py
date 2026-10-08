@@ -19,10 +19,10 @@ from docx import Document
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
-from backend.config import DATA_DIR
+from backend.config.settings import DATA_DIR
 
 try:
-    import backend.config as cfg
+    import backend.config.settings as cfg
     LAYOUT_CFG = getattr(cfg, "LAYOUT", {})
     CHUNK_CFG = getattr(cfg, "CHUNK", {})
 except Exception:
@@ -35,7 +35,7 @@ OCR_READER = None
 
 def _detect_ocr_gpu() -> bool:
     try:
-        import backend.config as cfg
+        import backend.config.settings as cfg
         if hasattr(cfg, "OCR_USE_GPU"):
             return bool(cfg.OCR_USE_GPU)
     except Exception:

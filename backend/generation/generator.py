@@ -16,7 +16,7 @@ import requests
 import time
 from functools import lru_cache
 
-from backend.config import (
+from backend.config.settings import (
     DEVICE,
     GEN_MAX_TOKENS,
     GEN_MAX_TOKENS_SOCIAL,
@@ -377,8 +377,29 @@ def _generate_transformers_with_history(
     return text.strip()
 
 
+def _use_langchain() -> bool:
+    """Co dung LangChain cho Generation khong? Lazy + fallback an toan."""
+    try:
+        import backend.config.settings as _cfg
+        if not bool(getattr(_cfg, "USE_LANGCHAIN", True)):
+            return False
+    except Exception:
+        pass
+    try:
+        from backend.generation.langchain_chain import is_enabled
+        return bool(is_enabled())
+    except Exception:
+        return False
+
+
 def generate(context: list[dict], question: str, style: str | None = None) -> str:
     """Sinh câu trả lời đơn lượt (tự chọn backend theo cấu hình)."""
+    if _use_langchain() and LLM_BACKEND == "ollama":
+        try:
+            from backend.generation.langchain_chain import generate_via_langchain
+            return generate_via_langchain(context, question, style=style)
+        except Exception as e:
+            print(f"[generator] langchain fail, fallback manual: {e}")
     if LLM_BACKEND == "ollama":
         return _generate_ollama(context, question, style=style)
     return _generate_transformers(context, question, style=style)
@@ -392,6 +413,12 @@ def generate_with_history(
     style: str | None = None,
 ) -> str:
     """Sinh câu trả lời có kèm lịch sử hội thoại và tóm tắt (tự chọn backend)."""
+    if _use_langchain() and LLM_BACKEND == "ollama":
+        try:
+            from backend.generation.langchain_chain import generate_with_history_via_langchain
+            return generate_with_history_via_langchain(context, question, history, summary, style=style)
+        except Exception as e:
+            print(f"[generator] langchain history fail, fallback manual: {e}")
     if LLM_BACKEND == "ollama":
         return _generate_ollama_with_history(context, question, history, summary, style=style)
     return _generate_transformers_with_history(context, question, history, summary, style=style)
@@ -486,6 +513,24 @@ def rewrite_query(question: str, history: list[dict] | None) -> str:
         cache_key = None
 
     model = REWRITE_MODEL or LLM_MODEL
+    # Uu tien LangChain history-aware rewrite (cung model, prompt LCEL), fail -> manual ben duoi
+    if _use_langchain() and LLM_BACKEND == "ollama":
+        try:
+            from backend.generation.langchain_chain import rewrite_via_langchain
+            lc_rewritten = rewrite_via_langchain(question, history)
+            if lc_rewritten:
+                low_re = lc_rewritten.lower()
+                if not any(p.strip() in low_re for p in [" nó ", " cái đó", " cái này", " trong đó", " ở trên"]):
+                    try:
+                        if cache_key is not None:
+                            if len(_rewrite_cache) >= _CACHE_MAX:
+                                _rewrite_cache.pop(next(iter(_rewrite_cache)))
+                            _rewrite_cache[cache_key] = lc_rewritten
+                    except Exception:
+                        pass
+                    return lc_rewritten
+        except Exception as e:
+            print(f"[generator] langchain rewrite fail, fallback manual: {e}")
     messages = build_rewrite_messages(history, question)
     try:
         if LLM_BACKEND == "ollama":
@@ -592,6 +637,22 @@ def summarize_history(history: list[dict]) -> str:
     except Exception:
         s_key = None
     model = SUMMARY_MODEL or LLM_MODEL
+    # Uu tien LangChain summary chain, fail -> manual ben duoi
+    if _use_langchain() and LLM_BACKEND == "ollama":
+        try:
+            from backend.generation.langchain_chain import summarize_via_langchain
+            lc_summary = summarize_via_langchain(history)
+            if lc_summary:
+                try:
+                    if s_key is not None:
+                        if len(_summary_cache) >= _CACHE_MAX:
+                            _summary_cache.pop(next(iter(_summary_cache)))
+                        _summary_cache[s_key] = lc_summary
+                except Exception:
+                    pass
+                return lc_summary
+        except Exception as e:
+            print(f"[generator] langchain summary fail, fallback manual: {e}")
     messages = build_summary_messages(history)
     try:
         if LLM_BACKEND == "ollama":
@@ -737,7 +798,7 @@ def _is_social_llm(question: str) -> bool | None:
         # Dùng model chính, timeout ngắn để không chặn lâu
         # num_predict nhỏ vì chỉ cần 1 từ
         try:
-            from backend.config import OLLAMA_BASE as _BASE, LLM_MODEL as _MODEL
+            from backend.config.settings import OLLAMA_BASE as _BASE, LLM_MODEL as _MODEL
             import requests as _rq
             sess = _get_ollama_session()
             payload = {
@@ -860,14 +921,8 @@ def detect_file_intent(file_text: str) -> dict:
     if not txt:
         return {"has_request": False, "extracted_query": "", "reason": "file rỗng"}
     low = txt.lower()
-    # helper bỏ dấu để so khớp không dấu
-    def _strip_acc(t: str) -> str:
-        import unicodedata as _ud
-        try:
-            return "".join(c for c in _ud.normalize("NFD", t) if _ud.category(c) != "Mn")
-        except Exception:
-            return t
-    low_no_acc = _strip_acc(low)
+    # helper bỏ dấu để so khớp không dấu (dùng chung _strip_accents cấp module)
+    low_no_acc = _strip_accents(low)
     # Heuristic nhanh
     question_marks = txt.count("?")
     # Từ khóa mệnh lệnh / câu hỏi (cả có dấu và không dấu)
@@ -879,7 +934,7 @@ def detect_file_intent(file_text: str) -> dict:
         "exercise", "question", "answer", "please", "summarize"
     ]
     # thêm bản không dấu để bắt cả gõ không dấu
-    imperative_no_acc = [_strip_acc(k) for k in imperative_keywords]
+    imperative_no_acc = [_strip_accents(k) for k in imperative_keywords]
     has_keyword = any(kw in low for kw in imperative_keywords) or any(kw in low_no_acc for kw in imperative_no_acc)
     # Mệnh lệnh mạnh không cần dấu ? : hãy, vui lòng, tóm tắt, phân tích...
     strong_imperative = ["hãy", "vui lòng", "vui long", "hay tom tat", "hãy tóm tắt", "tom tat", "tóm tắt", "phan tich", "phân tích", "tra loi", "trả lời", "giai thich", "giải thích", "hay cho biet", "hãy cho biết"]

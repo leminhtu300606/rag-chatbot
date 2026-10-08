@@ -3,16 +3,24 @@
 Mỗi file nguồn sinh một file Parquet tại data/processed/<category>/<sub>/<ten>.parquet,
 mỗi dòng là một chunk đã làm sạch kèm metadata. Đây là "data tốt nhất" dùng cho index.
 """
+import argparse
 import os
 import sys
 import warnings
 import logging
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore")
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
 logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+from collections import Counter
 from pathlib import Path
 
-import backend.config as cfg
+import backend.config.settings as cfg
 
 # Đảm bảo stdout hỗ trợ UTF-8 (tránh lỗi cp1252 trên Windows)
 try:
@@ -200,7 +208,7 @@ def _build_chunks_from_records(records: list[dict], filename: str, category: str
             })
     if out_chunks:
         try:
-            from backend.utils.dedup import deduplicate_chunk_dicts
+            from backend.common.utils import deduplicate_chunk_dicts
             before = len(out_chunks)
             out_chunks = deduplicate_chunk_dicts(out_chunks, threshold=cfg.CHUNK.get("dedup_threshold", 0.92), exact_only=cfg.CHUNK.get("dedup_exact_only", False))
             if len(out_chunks) != before:
@@ -240,12 +248,32 @@ def _build_chunks_from_records(records: list[dict], filename: str, category: str
     return out_chunks
 
 
-def process_file(path, session_id: str | None = None) -> int:
-    """Xử lý 1 file -> parquet (global) hoặc trả chunk với session_id."""
+def _show_clean_sample(raw_text: str, cleaned: str, preview: int = 600):
+    """Hien thi truoc/sau khi lam sach de kiem tra (gop tu clean_service)."""
+    print("\n--- RAW (truoc clean) preview ---")
+    print(raw_text[:preview] + ("..." if len(raw_text) > preview else ""))
+    print(f"  [raw chars: {len(raw_text)} | lines: {len(raw_text.splitlines())}]")
+    print("\n--- CLEANED (sau clean) preview ---")
+    print(cleaned[:preview] + ("..." if len(cleaned) > preview else ""))
+    print(f"  [cleaned chars: {len(cleaned)} | lines: {len(cleaned.splitlines())}]")
+    print(f"  -> Giam {len(raw_text)-len(cleaned)} chars ({(len(raw_text)-len(cleaned))/max(len(raw_text),1)*100:.1f}%)")
+    print("-" * 60)
+
+
+def process_file(path, session_id: str | None = None, dry_run: bool = False, show_sample: bool = False, preview: int = 600) -> int:
+    """Xử lý 1 file -> parquet (global) hoặc trả chunk với session_id.
+
+    dry_run/show_sample/preview chỉ áp dụng cho global (CLI backend.cli clean).
+    """
     path = Path(path)
+    if not path.exists():
+        print(f"[clean] Khong ton tai: {path}", file=sys.stderr)
+        return 0
     records = load_file(path)
     if not records:
-        return 0
+        if not session_id:
+            print(f"[clean] Khong doc duoc gi tu {path.name} (co the file rong/khong ho tro)")
+        return [] if session_id else 0  # type: ignore[return-value]
     try:
         rel = path.resolve().relative_to(cfg.DATA_DIR.resolve())
         if len(rel.parts) > 1:
@@ -266,14 +294,37 @@ def process_file(path, session_id: str | None = None) -> int:
         rec.setdefault("subcategory", subcategory)
         rec.setdefault("filename", filename)
         rec.setdefault("source", source)
+
+    if show_sample and not session_id:
+        for rec in records:
+            raw = rec.get("text", "")
+            if raw.strip():
+                print(f"\n[File: {path.name} | page {rec.get('page','?')} | kind={rec.get('kind','')}]")
+                _show_clean_sample(raw, clean_text(raw), preview=preview)
+                break
+
     out_chunks = _build_chunks_from_records(records, filename, category, subcategory, source, session_id=session_id)
     if session_id:
-        # Không ghi parquet chung, trả số chunks để caller tự embed/add
+        # Không ghi parquet chung, trả chunks để caller tự embed/add
         return out_chunks  # type: ignore[return-value]
+    if dry_run:
+        print(f"[dry-run] {path.name}: {len(records)} pages -> {len(out_chunks)} chunks (khong ghi file)")
+        return 0
     out = _out_path(path)
     from backend.preprocessing.storage import save_chunks
     save_chunks(out, out_chunks)
+    try:
+        rel_out = out.relative_to(cfg.BASE_DIR)
+    except ValueError:
+        rel_out = out
+    use_contextual = cfg.CHUNK.get("contextual", True) if isinstance(cfg.CHUNK, dict) else True
+    print(f"[clean] {path.name}: {len(records)} pages -> {len(out_chunks)} chunks -> {rel_out} (mode={'contextual' if use_contextual else 'semantic'})")
     return len(out_chunks)
+
+
+def clean_single_file(path: Path, dry_run: bool = False, show_sample: bool = False, preview: int = 600) -> int:
+    """Bí danh giữ tương thích (gộp từ clean_service)."""
+    return process_file(path, dry_run=dry_run, show_sample=show_sample, preview=preview)  # type: ignore[return-value]
 
 
 def process_file_to_chunks(path: Path, session_id: str, filename_override: str | None = None) -> list[dict]:
@@ -298,21 +349,166 @@ def process_file_to_chunks(path: Path, session_id: str, filename_override: str |
     return chunks
 
 
-def process_all(data_dir: Path | None = None) -> int:
+def process_all(data_dir: Path | None = None, dry_run: bool = False, show_sample: bool = False, preview: int = 600) -> int:
+    """Quét data_dir -> processed (gộp logic clean_service.clean_all: lọc hậu tố, dry-run, mẫu, tổng kết)."""
     if data_dir is None:
         data_dir = cfg.DATA_DIR
     else:
         data_dir = Path(data_dir)
+    if not data_dir.exists():
+        print(f"[clean] DATA_DIR khong ton tai: {data_dir}", file=sys.stderr)
+        return 0
+    print(f"[clean] Quet {data_dir} -> {cfg.PROCESSED_DIR} (dry_run={dry_run})")
+    print(f"  CHUNK config: {cfg.CHUNK}")
     total = 0
+    file_count = 0
     for root, _, files in os.walk(data_dir):
         for fn in files:
             if fn.startswith("~$"):
                 continue
             p = Path(root) / fn
+            if p.suffix.lower() not in (".pdf", ".docx", ".txt"):
+                continue
             try:
-                n = process_file(p)
+                do_show = show_sample and file_count == 0
+                n = process_file(p, dry_run=dry_run, show_sample=do_show, preview=preview)
                 total += n
-                print(f"[preprocess] {p.name}: {n} chunks")
+                file_count += 1
             except Exception as e:
-                print(f"[preprocess] LỖI {p}: {e}")
+                print(f"[clean] Loi {p}: {e}")
+                import traceback
+                traceback.print_exc()
+    print(f"\n[clean] Hoan tat: {file_count} files -> {total} chunks {'(dry-run, chua ghi)' if dry_run else ''}")
     return total
+
+
+def clean_all(data_dir: Path | None = None, dry_run: bool = False, show_sample: bool = False, preview: int = 600) -> int:
+    """Bí danh giữ tương thích (gộp từ clean_service)."""
+    return process_all(data_dir, dry_run=dry_run, show_sample=show_sample, preview=preview)
+
+
+def show_stats():
+    """Hien thi thong ke data sach trong data/processed (gop tu clean_service)."""
+    from backend.preprocessing.storage import get_processed_files, load_chunks
+    print("=" * 70)
+    print("THONG KE DATA SACH - data/processed/")
+    print("=" * 70)
+    print(f"PROCESSED_DIR: {cfg.PROCESSED_DIR} (exists={cfg.PROCESSED_DIR.exists()})  ext={getattr(cfg,'PROCESSED_EXT','.parquet')}")
+    if not cfg.PROCESSED_DIR.exists():
+        print("  Chua co data sach. Hay chay: python -m backend.cli clean")
+        return
+
+    files = get_processed_files()
+    print(f"Tong file {getattr(cfg,'PROCESSED_EXT','.parquet')}: {len(files)}")
+    if not files:
+        print("  Chua co chunk nao.")
+        return
+
+    total = 0
+    mode_cnt = Counter()
+    cat_cnt = Counter()
+    for jf in files:
+        try:
+            chunks = load_chunks(jf)
+            total += len(chunks)
+            for ch in chunks[:20]:
+                try:
+                    mode_cnt[ch.get("chunk_mode","unknown")] += 1
+                    cat_cnt[ch.get("category","unknown")] += 1
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"  Loi doc {jf}: {e}")
+
+    print(f"Tong chunks: {total}")
+    print(f"Phan bo chunk_mode: {dict(mode_cnt)}")
+    print(f"Phan bo category: {dict(cat_cnt)}")
+
+    print("\n--- Mau data sach (2 chunks dau) ---")
+    shown = 0
+    for jf in files[:2]:
+        try:
+            chunks = load_chunks(jf)
+            if not chunks:
+                continue
+            ch = chunks[0]
+            print(f"  File: {jf.relative_to(cfg.PROCESSED_DIR)} | id={ch.get('id')} | {ch.get('category')}/{ch.get('subcategory')} p{ch.get('page')} idx{ch.get('chunk_index')} mode={ch.get('chunk_mode')}")
+            print(f"    {ch.get('text','')[:250]}...")
+            shown += 1
+            if shown >= 2:
+                break
+        except Exception:
+            pass
+    print()
+
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="backend.cli clean",
+        description="Lam sach data tho -> data sach (preprocessing: load -> clean -> chunk -> luu parquet)",
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog=(
+            "Vi du:\n"
+            "  python -m backend.cli clean                          # lam sach toan bo data/classified\n"
+            "  python -m backend.cli clean --show-sample --preview 800\n"
+            "  python -m backend.cli clean data/classified/quy_che --dry-run\n"
+            "  python -m backend.cli clean data/classified/quy_che/dao_tao/file.pdf --show-sample\n"
+            "  python -m backend.cli clean --stats                   # chi xem thong ke data sach\n"
+        ),
+    )
+    p.add_argument("path", nargs="?", default=None, help="Duong dan file/thu muc cu the (bo trong = toan bo DATA_DIR)")
+    p.add_argument("--data-dir", dest="data_dir", default=None, help="Ghi de DATA_DIR (mac dinh backend/config.py)")
+    p.add_argument("--dry-run", action="store_true", help="Chi hien thi, khong ghi file ra data/processed")
+    p.add_argument("--show-sample", action="store_true", help="Hien thi truoc/sau khi clean (raw vs cleaned) cho file dau tien")
+    p.add_argument("--preview", type=int, default=600, help="So ky tu preview khi show-sample (mac dinh 600)")
+    p.add_argument("--stats", action="store_true", help="Chi hien thi thong ke data sach hien co, khong lam sach")
+    return p
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    if args.stats:
+        show_stats()
+        return 0
+
+    if args.path:
+        p = Path(args.path)
+        if p.is_file():
+            process_file(p, dry_run=args.dry_run, show_sample=args.show_sample or True, preview=args.preview)
+            if not args.dry_run:
+                show_stats()
+            return 0
+        elif p.is_dir():
+            process_all(p, dry_run=args.dry_run, show_sample=args.show_sample, preview=args.preview)
+            if not args.dry_run:
+                show_stats()
+            return 0
+        else:
+            alt = cfg.DATA_DIR / args.path
+            if alt.exists():
+                if alt.is_file():
+                    process_file(alt, dry_run=args.dry_run, show_sample=True, preview=args.preview)
+                else:
+                    process_all(alt, dry_run=args.dry_run, show_sample=args.show_sample, preview=args.preview)
+                return 0
+            print(f"[clean] Khong tim thay: {args.path}", file=sys.stderr)
+            return 1
+
+    data_dir = Path(args.data_dir) if args.data_dir else None
+    process_all(data_dir, dry_run=args.dry_run, show_sample=args.show_sample, preview=args.preview)
+    if not args.dry_run and not args.show_sample:
+        show_stats()
+    return 0
+
+
+__all__ = [
+    "process_file", "process_file_to_chunks", "process_all",
+    "clean_single_file", "clean_all", "show_stats", "build_parser", "main",
+    "_build_chunks_from_records", "_out_path",
+]
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

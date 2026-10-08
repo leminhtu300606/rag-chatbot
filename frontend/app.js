@@ -1,3 +1,26 @@
+/* GĐ2 production: tự gắn Bearer token vào mọi /api/* + bật login khi 401 */
+(function(){
+  const KEY = "rag_token";
+  window.ragGetToken = () => { try { return localStorage.getItem(KEY); } catch(e){ return null; } };
+  window.ragSetToken = t => { try { if (t) localStorage.setItem(KEY, t); else localStorage.removeItem(KEY); } catch(e){} };
+  const _fetch = window.fetch.bind(window);
+  window.fetch = (url, opts = {}) => {
+    try {
+      const t = window.ragGetToken();
+      if (t && typeof url === "string" && url.startsWith("/api") && !url.startsWith("/api/auth/")) {
+        opts = Object.assign({}, opts);
+        opts.headers = Object.assign({}, opts.headers, { "Authorization": "Bearer " + t });
+      }
+    } catch(e){}
+    return _fetch(url, opts).then(r => {
+      if (r && r.status === 401 && typeof url === "string" && url.startsWith("/api") && !url.startsWith("/api/auth/")) {
+        try { const d = document.querySelector("#login-modal"); if (d && !d.open) d.showModal(); } catch(e){}
+      }
+      return r;
+    });
+  };
+})();
+
 const $ = s => document.querySelector(s);
 const messages = $("#messages");
 const welcome = $("#welcome");
@@ -1299,7 +1322,7 @@ async function send(){
       }
     }
     if(isNetErr){
-        bubble.innerHTML=`❌ <b>Lỗi kết nối:</b> Không kết nối được máy chủ ở <code>http://localhost:8000</code>. Hãy kiểm tra bạn đang chạy <code>uvicorn backend.app:app --port 8000</code> và Ollama đang chạy.<div class="meta" style="white-space:pre-wrap;word-break:break-word">${escapeHtml(msg.slice(0,800))}</div>`;
+        bubble.innerHTML=`❌ <b>Lỗi kết nối:</b> Không kết nối được máy chủ ở <code>http://localhost:8000</code>. Hãy kiểm tra bạn đang chạy <code>uvicorn backend.api:app --port 8000</code> và Ollama đang chạy.<div class="meta" style="white-space:pre-wrap;word-break:break-word">${escapeHtml(msg.slice(0,800))}</div>`;
       } else {
         // Giữ nguyên nội dung lỗi chi tiết để debug, giới hạn 800 ký tự
         bubble.innerHTML=`❌ <b>Lỗi:</b> <span style="white-space:pre-wrap;word-break:break-word">${escapeHtml(msg.slice(0,1200))}</span><div class="meta">Kiểm tra Ollama/backend. Nếu cần, thử tắt rerank hoặc giảm top_k.</div>`;
@@ -1313,3 +1336,45 @@ async function send(){
 sendBtn?.addEventListener("click", send);
 input?.addEventListener("keydown", e=>{ if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); send(); }});
 input?.focus();
+
+/* GĐ2 production: login/logout + hiển thị user */
+(function(){
+  const dlg = () => document.querySelector("#login-modal");
+  const nameEl = () => document.querySelector("#account-name");
+  async function refreshMe(){
+    try{
+      const r = await fetch("/api/auth/me");
+      if(!r.ok) throw 0;
+      const me = await r.json();
+      if (nameEl() && me.username && me.username !== "anonymous") nameEl().textContent = me.username;
+    }catch(e){}
+  }
+  document.querySelector("#login-btn")?.addEventListener("click", async ()=>{
+    if (window.ragGetToken()) {
+      try{ await fetch("/api/auth/logout", {method:"POST"}); }catch(e){}
+      window.ragSetToken(null);
+      if (nameEl()) nameEl().textContent = "Học viên KTMM";
+      try{ localStorage.removeItem(LS_SESSIONS); localStorage.removeItem(LS_ACTIVE); }catch(e){}
+      location.reload();
+      return;
+    }
+    try{ dlg()?.showModal(); }catch(e){}
+  });
+  document.querySelector("#login-go")?.addEventListener("click", async (e)=>{
+    e.preventDefault();
+    const u = document.querySelector("#login-user")?.value || "";
+    const p = document.querySelector("#login-pass")?.value || "";
+    const err = document.querySelector("#login-err");
+    try{
+      const r = await fetch("/api/auth/login", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({username:u, password:p})});
+      if(!r.ok){ const j = await r.json().catch(()=>({})); if(err) err.textContent = j.detail || "Đăng nhập thất bại"; return; }
+      const j = await r.json();
+      window.ragSetToken(j.token);
+      try{ dlg()?.close(); }catch(e2){}
+      if (nameEl()) nameEl().textContent = j.username;
+      try{ localStorage.removeItem(LS_SESSIONS); localStorage.removeItem(LS_ACTIVE); }catch(e2){}
+      location.reload();
+    }catch(ex){ if(err) err.textContent = "Không kết nối được máy chủ"; }
+  });
+  refreshMe();
+})();

@@ -1,5 +1,5 @@
 """
-backend/app.py - FastAPI cho RAG Chatbot
+backend/api.py - FastAPI cho RAG Chatbot
 =========================================
 Nhiệm vụ:
 - Cung cấp API cho frontend và quản lý hội thoại có ngữ cảnh.
@@ -12,20 +12,20 @@ Endpoints:
   GET  /api/sessions/{id}        # chi tiết phiên
   DELETE /api/sessions/{id}      # xóa phiên
 
-Chạy: uvicorn backend.app:app --reload --port 8000
-      hoặc: python -m backend.app
+Chạy: uvicorn backend.api:app --reload --port 8000
+      hoặc: python -m backend.api
 """
 from pathlib import Path
 import sys
 
 # Fix import khi chay truc tiep
 if __package__ in (None, ""):
-    _ROOT = Path(__file__).resolve().parent.parent
+    _ROOT = Path(__file__).resolve().parent.parent.parent
     if str(_ROOT) not in sys.path:
         sys.path.insert(0, str(_ROOT))
 
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, BackgroundTasks
+from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -38,42 +38,46 @@ import re
 import shutil
 import os
 
-import backend.config as cfg
-# Security
-try:
-    from backend.security import (
-        validate_question, validate_category, validate_top_k, validate_session_id,
-        validate_tool_call, validate_output, validate_sources,
-        sanitize_input, detect_injection
-    )
-except Exception:
-    # Fallback nếu chưa có security.py
-    def validate_question(x): return x.strip()[:2000]
-    def validate_category(x): return x
-    def validate_top_k(x): return x
-    def validate_session_id(x): return x
-    def validate_tool_call(n,p): return p
-    def validate_output(x, max_len=4000): return x[:max_len]
-    def validate_sources(x): return x
-    def sanitize_input(x, max_len=2000): return x[:max_len]
-    def detect_injection(x): return False
+import backend.config.settings as cfg
+# Security (gop trong backend.config.settings)
+from backend.config.settings import (
+    validate_question, validate_category, validate_top_k, validate_session_id,
+    validate_tool_call, validate_output, validate_sources,
+    sanitize_input, detect_injection,
+)
+from backend.security import auth as auth_mod
+from backend.security.auth import require_user, require_admin, get_current_user_opt
 
-# Rate limiting đơn giản: 30 requests / phút / IP
+# Rate limiting: N requests / phút / identity (user đã login, ngược lại theo IP)
 _rate_limit: Dict[str, List[float]] = {}
 _rate_lock = threading.Lock()
-RATE_LIMIT_MAX = 30
-RATE_LIMIT_WINDOW = 60
 
-def _check_rate_limit(ip: str):
+def _rate_limit_cfg():
+    try:
+        return int(cfg.RATE_LIMIT_MAX), int(cfg.RATE_LIMIT_WINDOW)
+    except Exception:
+        return 30, 60
+
+def _check_rate_limit(key: str):
+    rmax, rwin = _rate_limit_cfg()
     now = time.time()
     with _rate_lock:
-        lst = _rate_limit.get(ip, [])
+        lst = _rate_limit.get(key, [])
         # giữ lại trong window
-        lst = [t for t in lst if now - t < RATE_LIMIT_WINDOW]
-        if len(lst) >= RATE_LIMIT_MAX:
+        lst = [t for t in lst if now - t < rwin]
+        if len(lst) >= rmax:
             raise HTTPException(status_code=429, detail="Quá nhiều yêu cầu, vui lòng thử lại sau 1 phút")
         lst.append(now)
-        _rate_limit[ip] = lst
+        _rate_limit[key] = lst
+
+def _identity_key(request: Request, user: Optional[Dict] = None) -> str:
+    if user and user.get("username") not in (None, "anonymous"):
+        return f"user:{user['username']}"
+    try:
+        ip = request.client.host if request.client else "unknown"
+    except Exception:
+        ip = "unknown"
+    return f"ip:{ip}"
 
 def _print_banner(host: str = "0.0.0.0", port: int = 8000):
     """In link chay ra console cho de thay."""
@@ -107,7 +111,7 @@ from fastapi.responses import StreamingResponse
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # In banner khi chay bang `uvicorn backend.app:app` (khong qua __main__)
+    # In banner khi chay bang `uvicorn backend.api:app` (khong qua __main__)
     try:
         _print_banner(host="0.0.0.0", port=8000)
     except Exception:
@@ -128,7 +132,31 @@ async def lifespan(app: FastAPI):
         await run_in_threadpool(_warm)
     except Exception as e:
         print(f"[warmup] failed: {e}")
-    yield
+    # GĐ2: bootstrap admin + GĐ3: job dọn phiên/upload hết hạn định kỳ
+    try:
+        auth_mod.ensure_bootstrap_admin()
+    except Exception as e:
+        print(f"[auth] bootstrap failed: {e}")
+
+    async def _janitor():
+        while True:
+            try:
+                await asyncio.sleep(int(cfg.CLEANUP_INTERVAL_SECONDS))
+                await run_in_threadpool(_cleanup_sessions)
+                await run_in_threadpool(_sweep_orphan_uploads)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"[janitor] {e}")
+
+    _janitor_task = asyncio.create_task(_janitor())
+    try:
+        yield
+    finally:
+        try:
+            _janitor_task.cancel()
+        except Exception:
+            pass
 
 app = FastAPI(
     title="RAG Chatbot - Hoc vien Ky thuat Mat ma",
@@ -147,9 +175,13 @@ app.add_middleware(
 )
 
 # ── Quản lý phiên hội thoại (session memory + persistent) ──
-# Lưu trữ in-memory + persist ra file JSON để sống qua restart: {session_id: {"history": [...], "summary": str|None, "title": str|None, "style": str, "updated_at": float, "created_at": float}}
+# Lưu trữ in-memory + persist ra file JSON để sống qua restart: {session_id: {"history": [...], "summary": str|None, "title": str|None, "style": str, "owner": str|None, "updated_at": float, "created_at": float}}
+# owner: username sở hữu phiên (GĐ2 RBAC). Dùng ContextVar để impl tự gắn owner mà không đổi chữ ký các hàm gọi.
+from contextvars import ContextVar
+_current_user: ContextVar = ContextVar("api_user", default=None)
+
 _sessions: Dict[str, Dict[str, Any]] = {}
-_sessions_lock = threading.Lock()
+_sessions_lock = threading.RLock()  # RLock để _require_session_owner gọi lồng được
 MAX_SESSIONS = 200
 SESSION_TTL_SECONDS = 24 * 3600  # 24h
 SESSIONS_FILE = cfg.BASE_DIR / "data" / "sessions.json"
@@ -184,6 +216,7 @@ def _load_sessions():
                         v.setdefault("history", [])
                         v.setdefault("summary", None)
                         v.setdefault("title", None)
+                        v.setdefault("owner", None)
                         v.setdefault("style", cfg.DEFAULT_STYLE)
                         v.setdefault("last_math_result", None)
                         v.setdefault("created_at", time.time())
@@ -237,8 +270,62 @@ def _cleanup_sessions():
         except Exception:
             pass
 
+
+def _sweep_orphan_uploads() -> int:
+    """GĐ3: xóa thư mục upload của phiên đã mất (không còn trong _sessions)."""
+    removed = 0
+    try:
+        base = cfg.UPLOAD_DIR
+        if not base.is_dir():
+            return 0
+        with _sessions_lock:
+            alive = set(_sessions.keys())
+        for p in base.iterdir():
+            try:
+                if p.is_dir() and p.name not in alive:
+                    import shutil as _sh3
+                    _sh3.rmtree(p, ignore_errors=True)
+                    removed += 1
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[janitor] sweep uploads failed: {e}")
+    if removed:
+        print(f"[janitor] đã xóa {removed} thư mục upload mồ côi")
+    return removed
+
+def _current_username() -> Optional[str]:
+    try:
+        u = _current_user.get() or {}
+        name = u.get("username")
+        return name if name and name != "anonymous" else None
+    except Exception:
+        return None
+
+
+def _require_session_owner(sid: str, user: Optional[Dict]) -> None:
+    """Chặn user đọc phiên của user khác (GĐ2). Tự nhận phiên mồ côi (owner None)."""
+    if not cfg.AUTH_ENABLED:
+        return
+    if (user or {}).get("is_admin"):
+        return
+    uname = (user or {}).get("username")
+    with _sessions_lock:
+        sess = _sessions.get(sid)
+        if not sess:
+            return
+        owner = sess.get("owner")
+        if owner and uname and owner != uname:
+            raise HTTPException(status_code=403, detail="Không có quyền truy cập phiên này")
+        if not owner and uname and uname != "anonymous":
+            sess["owner"] = uname
+            sess["updated_at"] = time.time()
+            _save_sessions()
+
+
 def _get_or_create_session(session_id: Optional[str], title: Optional[str] = None, style: Optional[str] = None) -> str:
     _cleanup_sessions()
+    owner = _current_username()
     # chuẩn hóa style
     if style and style not in cfg.AVAILABLE_STYLES:
         style = cfg.DEFAULT_STYLE
@@ -247,11 +334,13 @@ def _get_or_create_session(session_id: Optional[str], title: Optional[str] = Non
         created = False
         with _sessions_lock:
             if sid not in _sessions:
-                _sessions[sid] = {"history": [], "summary": None, "title": title, "style": style or cfg.DEFAULT_STYLE, "last_math_result": None, "created_at": time.time(), "updated_at": time.time()}
+                _sessions[sid] = {"history": [], "summary": None, "title": title, "owner": owner, "style": style or cfg.DEFAULT_STYLE, "last_math_result": None, "created_at": time.time(), "updated_at": time.time()}
                 created = True
             else:
                 if title and not _sessions[sid].get("title"):
                     _sessions[sid]["title"] = title
+                if owner and not _sessions[sid].get("owner"):
+                    _sessions[sid]["owner"] = owner
                 if style and _sessions[sid].get("style") != style:
                     # nếu caller truyền style mới thì cập nhật
                     _sessions[sid]["style"] = style
@@ -263,7 +352,7 @@ def _get_or_create_session(session_id: Optional[str], title: Optional[str] = Non
     # tao moi
     sid = str(uuid.uuid4())
     with _sessions_lock:
-        _sessions[sid] = {"history": [], "summary": None, "title": title, "style": style or cfg.DEFAULT_STYLE, "last_math_result": None, "created_at": time.time(), "updated_at": time.time()}
+        _sessions[sid] = {"history": [], "summary": None, "title": title, "owner": owner, "style": style or cfg.DEFAULT_STYLE, "last_math_result": None, "created_at": time.time(), "updated_at": time.time()}
     _save_sessions()
     return sid
 
@@ -272,7 +361,7 @@ def _append_to_session(session_id: str, user_q: str, assistant_a: str, summary: 
     with _sessions_lock:
         sess = _sessions.get(session_id)
         if not sess:
-            _sessions[session_id] = {"history": [], "summary": summary, "title": None, "style": style or cfg.DEFAULT_STYLE, "last_math_result": last_math_result, "created_at": time.time(), "updated_at": time.time()}
+            _sessions[session_id] = {"history": [], "summary": summary, "title": None, "owner": _current_username(), "style": style or cfg.DEFAULT_STYLE, "last_math_result": last_math_result, "created_at": time.time(), "updated_at": time.time()}
             sess = _sessions[session_id]
             need_save = True
         sess["history"].append({"role": "user", "content": user_q})
@@ -418,6 +507,43 @@ def _get_stats():
         return {"error": str(e)}
 
 # --- Routes ---
+@app.middleware("http")
+async def _auth_context(request: Request, call_next):
+    """Gắn user (nếu có Bearer token hợp lệ) vào ContextVar cho mọi request."""
+    user = None
+    if cfg.AUTH_ENABLED:
+        try:
+            h = request.headers.get("authorization", "")
+            if h.lower().startswith("bearer "):
+                user = auth_mod.get_user_by_token(h[7:].strip())
+        except Exception:
+            user = None
+    tok = _current_user.set(user)
+    try:
+        return await call_next(request)
+    finally:
+        _current_user.reset(tok)
+
+
+_ollama_cache: Dict[str, Any] = {"ok": None, "ts": 0.0}
+
+def _ollama_ok() -> Optional[bool]:
+    """Kiểm tra Ollama sống không (cache 30s, timeout ngắn). None = không cấu hình check."""
+    now = time.time()
+    if now - _ollama_cache.get("ts", 0) < 30 and _ollama_cache.get("ok") is not None:
+        return _ollama_cache["ok"]
+    ok = False
+    try:
+        import urllib.request
+        base = (cfg.OLLAMA_BASE or "").rstrip("/")
+        with urllib.request.urlopen(base + "/api/tags", timeout=3) as r:
+            ok = r.status == 200
+    except Exception:
+        ok = False
+    _ollama_cache.update(ok=ok, ts=now)
+    return ok
+
+
 @app.get("/api")
 async def api_root():
     return {"message": "RAG Chatbot API", "docs": "/docs", "health": "/api/health"}
@@ -430,30 +556,142 @@ async def health():
         c = count()
         files = get_processed_files()
         ready = c > 0 and len(files) > 0
-        return {
+        out = {
             "status": "ready" if ready else "not_ready",
             "chroma_count": c,
             "processed_files": len(files),
-            "message": "OK" if ready else "Chua co data. Hay chay: python -m backend.clean && python -m backend.index --rebuild",
+            "message": "OK" if ready else "Chua co data. Hay chay: python -m backend.cli clean && python -m backend.cli index --rebuild",
+            "auth_enabled": bool(cfg.AUTH_ENABLED),
+            "llm": f"{cfg.LLM_BACKEND}/{cfg.LLM_MODEL}",
         }
+        # GĐ3: kiểm tra phụ (không làm fail readiness cơ bản)
+        try:
+            out["ollama_ok"] = _ollama_ok()
+        except Exception:
+            out["ollama_ok"] = False
+        try:
+            import shutil as _shd
+            du = _shd.disk_usage(str(cfg.BASE_DIR))
+            out["disk_free_gb"] = round(du.free / 1024 / 1024 / 1024, 2)
+        except Exception:
+            pass
+        return out
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+@app.get("/api/metrics")
+async def metrics(admin: Dict = Depends(require_admin)):
+    """GĐ3: tổng hợp từ data/logs/chat.jsonl (count, latency p50/p95, no-source rate, cache hit)."""
+    import statistics
+    rows = []
+    try:
+        p = cfg.LOG_DIR / "chat.jsonl"
+        if p.exists():
+            with open(p, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rows.append(json.loads(line))
+                    except Exception:
+                        pass
+            rows = rows[-5000:]
+    except Exception as e:
+        return {"error": str(e)}
+    if cfg.AUTH_ENABLED and not (admin or {}).get("is_admin"):
+        raise HTTPException(status_code=403, detail="Cần quyền admin")
+    if not rows:
+        return {"count": 0}
+    lats = sorted(r.get("latency", 0) for r in rows if isinstance(r.get("latency"), (int, float)))
+    def _pct(q):
+        if not lats:
+            return 0
+        i = min(len(lats) - 1, int(q * len(lats)))
+        return round(lats[i], 3)
+    from backend.infra import cache as _cache
+    return {
+        "count": len(rows),
+        "latency_p50": _pct(0.5),
+        "latency_p95": _pct(0.95),
+        "no_source_rate": round(sum(1 for r in rows if r.get("no_source")) / len(rows), 4),
+        "cached_rate": round(sum(1 for r in rows if r.get("cached")) / len(rows), 4),
+        "stream_rate": round(sum(1 for r in rows if r.get("stream")) / len(rows), 4),
+        "by_category": {k: sum(1 for r in rows if (r.get("category") or "all") == k)
+                        for k in set((r.get("category") or "all") for r in rows)},
+        "cache_items": _cache.stats().get("items", 0),
+        "active_sessions": len(_sessions),
+    }
 
 @app.get("/api/stats")
 async def stats():
     return _get_stats()
 
 @app.get("/api/categories")
-async def categories():
+async def categories(user: Optional[Dict] = Depends(get_current_user_opt)):
+    if cfg.AUTH_ENABLED and user and "*" not in (user.get("categories") or ["*"]):
+        return {"categories": [c for c in cfg.CATEGORY_ORDER if c in (user.get("categories") or [])]}
     return {"categories": cfg.CATEGORY_ORDER}
+
+# ── Auth (GĐ2): login/logout/me/quản trị users ──
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str
+    is_admin: bool = False
+    categories: Optional[List[str]] = None
+
+@app.post("/api/auth/login")
+async def login(req: LoginRequest):
+    try:
+        return auth_mod.verify_login(req.username, req.password)
+    except ValueError as ve:
+        raise HTTPException(status_code=401, detail=str(ve))
+
+@app.post("/api/auth/logout")
+async def logout(user: Dict = Depends(require_user),
+                 creds=Depends(auth_mod._bearer)):
+    if creds and creds.credentials:
+        auth_mod.revoke_token(creds.credentials)
+    return {"ok": True}
+
+@app.get("/api/auth/me")
+async def me(user: Dict = Depends(require_user)):
+    return {"username": user.get("username"), "is_admin": user.get("is_admin"),
+            "categories": user.get("categories")}
+
+@app.get("/api/auth/users")
+async def users_list(admin: Dict = Depends(require_admin)):
+    return {"users": auth_mod.list_users(), "auth_enabled": cfg.AUTH_ENABLED}
+
+@app.post("/api/auth/users")
+async def users_create(req: CreateUserRequest, admin: Dict = Depends(require_admin)):
+    try:
+        return auth_mod.create_user(req.username, req.password, req.is_admin, req.categories)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
+@app.delete("/api/auth/users/{username}")
+async def users_delete(username: str, admin: Dict = Depends(require_admin)):
+    if username == admin.get("username"):
+        raise HTTPException(status_code=400, detail="Không tự xóa chính mình")
+    try:
+        auth_mod.delete_user(username)
+    except ValueError as ve:
+        raise HTTPException(status_code=404, detail=str(ve))
+    return {"deleted": username}
 
 # Endpoint quản lý phiên hội thoại
 @app.get("/api/sessions/{session_id}")
-async def get_session(session_id: str):
+async def get_session(session_id: str, user: Dict = Depends(require_user)):
     with _sessions_lock:
         sess = _sessions.get(session_id)
         if not sess:
             raise HTTPException(status_code=404, detail="Session not found")
+        _require_session_owner(session_id, user)
         return {
             "session_id": session_id,
             "history": sess["history"],
@@ -467,7 +705,8 @@ async def get_session(session_id: str):
         }
 
 @app.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str):
+async def delete_session(session_id: str, user: Dict = Depends(require_user)):
+    _require_session_owner(session_id, user)
     with _sessions_lock:
         if session_id in _sessions:
             _sessions.pop(session_id)
@@ -490,9 +729,13 @@ async def delete_session(session_id: str):
     return {"deleted": session_id}
 
 @app.get("/api/sessions")
-async def list_sessions():
+async def list_sessions(user: Dict = Depends(require_user)):
     with _sessions_lock:
         sessions = list(_sessions.items())
+    # RBAC: user thường chỉ thấy phiên của mình
+    if cfg.AUTH_ENABLED and not (user or {}).get("is_admin"):
+        uname = (user or {}).get("username")
+        sessions = [(sid, v) for sid, v in sessions if not v.get("owner") or v.get("owner") == uname]
     # sort mới nhất trước
     sessions.sort(key=lambda x: x[1].get("updated_at", 0), reverse=True)
     return {
@@ -519,7 +762,7 @@ class CreateSessionRequest(BaseModel):
     style: Optional[str] = None
 
 @app.post("/api/sessions")
-async def create_session(req: CreateSessionRequest = None):
+async def create_session(req: CreateSessionRequest = None, user: Dict = Depends(require_user)):
     title = (req.title.strip()[:50] if req and req.title and req.title.strip() else None)
     style = (req.style.strip().lower() if req and req.style and req.style.strip().lower() in cfg.AVAILABLE_STYLES else None)
     sid = _get_or_create_session(req.session_id if req and req.session_id else None, title=title, style=style)
@@ -539,7 +782,8 @@ class UpdateSessionRequest(BaseModel):
     title: str
 
 @app.patch("/api/sessions/{session_id}")
-async def update_session(session_id: str, req: UpdateSessionRequest):
+async def update_session(session_id: str, req: UpdateSessionRequest, user: Dict = Depends(require_user)):
+    _require_session_owner(session_id, user)
     with _sessions_lock:
         sess = _sessions.get(session_id)
         if not sess:
@@ -552,12 +796,95 @@ async def update_session(session_id: str, req: UpdateSessionRequest):
 
 # ── Upload theo phiên (chỉ lưu tại phiên) ──
 # Hỗ trợ dung lượng lớn: streaming ghi file, không load hết RAM
+# ── Upload hardening (GĐ2): magic bytes + quota user + ClamAV hook ──
+def _sniff_upload(path: Path, ext: str) -> Optional[str]:
+    """Kiểm tra magic bytes khớp đuôi file. None = OK, str = lý do từ chối."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(16)
+    except Exception:
+        return "Không đọc được file"
+    if ext == ".pdf":
+        return None if head.startswith(b"%PDF-") else "File không phải PDF hợp lệ (thiếu header %PDF)"
+    if ext == ".docx":
+        if not head.startswith(b"PK\x03\x04"):
+            return "File không phải DOCX hợp lệ"
+        return None
+    if ext in (".txt", ".md", ".csv", ".log"):
+        try:
+            head.decode("utf-8")
+            return None
+        except Exception:
+            return "File text phải ở định dạng UTF-8"
+    return None
+
+
+def _clamav_scan(path: Path) -> Optional[str]:
+    """Quét ClamAV qua INSTREAM. None = sạch/bỏ qua; str = lý do chặn."""
+    if not cfg.CLAMAV_ENABLED:
+        return None
+    import socket
+    try:
+        s = socket.create_connection((cfg.CLAMAV_HOST, int(cfg.CLAMAV_PORT)), timeout=15)
+        s.sendall(b"zINSTREAM\0")
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(8192)
+                if not chunk:
+                    break
+                s.sendall(len(chunk).to_bytes(4, "big") + chunk)
+        s.sendall((0).to_bytes(4, "big"))
+        resp = b""
+        while True:
+            d = s.recv(4096)
+            if not d:
+                break
+            resp += d
+        try:
+            s.close()
+        except Exception:
+            pass
+        txt = resp.decode("utf-8", errors="ignore")
+        if "FOUND" in txt:
+            return f"Phát hiện mã độc: {txt.strip()[:200]}"
+        return None
+    except Exception as e:
+        if cfg.CLAMAV_FAIL_CLOSED:
+            return f"Không quét virus được (fail-closed): {e}"
+        print(f"[clamav] bỏ qua (không kết nối được daemon): {e}")
+        return None
+
+
+def _user_upload_bytes(username: Optional[str]) -> int:
+    """Tổng dung lượng upload của 1 user (duyệt thư mục các phiên sở hữu)."""
+    if not username:
+        return 0
+    total = 0
+    try:
+        with _sessions_lock:
+            sids = [sid for sid, v in _sessions.items() if v.get("owner") == username]
+        for sid in sids:
+            d = cfg.UPLOAD_DIR / sid
+            if not d.is_dir():
+                continue
+            for p in d.iterdir():
+                try:
+                    if p.is_file():
+                        total += p.stat().st_size
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return total
+
+
 @app.get("/api/sessions/{session_id}/uploads")
-async def list_uploads(session_id: str):
+async def list_uploads(session_id: str, user: Dict = Depends(require_user)):
     try:
         session_id = validate_session_id(session_id)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _require_session_owner(session_id, user)
     _get_or_create_session(session_id)
     try:
         from backend.indexing.vectorstore import list_uploads_by_session, count_by_session
@@ -581,11 +908,12 @@ async def list_uploads(session_id: str):
 
 
 @app.delete("/api/sessions/{session_id}/uploads/{filename}")
-async def delete_upload_file(session_id: str, filename: str):
+async def delete_upload_file(session_id: str, filename: str, user: Dict = Depends(require_user)):
     try:
         session_id = validate_session_id(session_id)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _require_session_owner(session_id, user)
     # sanitize filename
     safe_name = re.sub(r"[^a-zA-Z0-9._\- ]", "_", filename).strip()[:200]
     if not safe_name:
@@ -620,13 +948,14 @@ async def delete_upload_file(session_id: str, filename: str):
 
 
 @app.post("/api/sessions/{session_id}/upload")
-async def upload_session_file(session_id: str, file: UploadFile = File(...)):
+async def upload_session_file(session_id: str, file: UploadFile = File(...), user: Dict = Depends(require_user)):
     # Rate limit nhẹ
     # Validate session_id
     try:
         session_id = validate_session_id(session_id)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"session_id lỗi: {e}")
+    _require_session_owner(session_id, user)
     _get_or_create_session(session_id)
     # Kiểm tra số lượng file hiện tại
     try:
@@ -695,6 +1024,31 @@ async def upload_session_file(session_id: str, file: UploadFile = File(...)):
             await file.close()
         except Exception:
             pass
+
+    # GĐ2: kiểm tra nội dung thật (magic bytes) + quét virus + quota user
+    _sniff_err = _sniff_upload(target_path, ext)
+    if _sniff_err:
+        try:
+            target_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail=_sniff_err)
+    _virus_err = await run_in_threadpool(lambda: _clamav_scan(target_path))
+    if _virus_err:
+        try:
+            target_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail=_virus_err)
+    _uname = (user or {}).get("username")
+    if _uname and _uname != "anonymous":
+        _quota = int(cfg.MAX_UPLOAD_MB_PER_USER) * 1024 * 1024
+        if _user_upload_bytes(_uname) > _quota:
+            try:
+                target_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise HTTPException(status_code=413, detail=f"Vượt quota upload {cfg.MAX_UPLOAD_MB_PER_USER}MB/user. Xóa bớt file cũ.")
 
     # Xử lý chunk + embed trong threadpool (không chặn event loop)
     def _process_and_index():
@@ -816,16 +1170,88 @@ async def upload_session_file(session_id: str, file: UploadFile = File(...)):
         "sources": auto_sources,
     }
 
-@app.post("/api/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest, request: Request):
-    # Rate limiting
+# ── Guard + cache + log cho /api/chat (GĐ2/GĐ4) ──
+def _guard_rate_quota(request: Request, user: Optional[Dict], count_quota: bool = True) -> None:
+    _check_rate_limit(_identity_key(request, user))
+    uname = (user or {}).get("username")
+    if cfg.AUTH_ENABLED and count_quota and uname and uname != "anonymous":
+        try:
+            auth_mod.bump_daily(uname, int(cfg.CHAT_DAILY_LIMIT))
+        except ValueError as ve:
+            raise HTTPException(status_code=429, detail=str(ve))
+
+
+def _guard_rbac(req: ChatRequest, user: Optional[Dict]) -> None:
+    if req.category and not auth_mod.user_can_category(user, req.category):
+        raise HTTPException(status_code=403, detail=f"Tài khoản không được xem category '{req.category}'")
+
+
+def _guard_owner(req: ChatRequest, user: Optional[Dict]) -> None:
+    if req.session_id and req.session_id.strip():
+        with _sessions_lock:
+            exists = req.session_id.strip() in _sessions
+        if exists:
+            _require_session_owner(req.session_id.strip(), user)
+
+
+def _cacheable(req: ChatRequest):
+    """Key cache cho câu đơn lượt giống hệt (không session/history)."""
+    if req.session_id or req.history or req.use_history:
+        return None
+    from backend.infra import cache as _cache
+    return _cache.make_key(req.question, req.category, req.top_k, req.style)
+
+
+def _log_chat(user: Optional[Dict], req: ChatRequest, resp, latency: float, cached: bool = False, stream: bool = False) -> None:
+    if not cfg.LOG_CHAT_JSONL:
+        return
     try:
-        ip = request.client.host if request.client else "unknown"
-        _check_rate_limit(ip)
-    except HTTPException:
-        raise
+        cfg.LOG_DIR.mkdir(parents=True, exist_ok=True)
+        uname = (user or {}).get("username") if user else None
+        entry = {
+            "ts": time.time(),
+            "user": uname,
+            "q_len": len(req.question or ""),
+            "category": req.category,
+            "top_k": req.top_k,
+            "latency": round(latency, 3),
+            "sources": len(resp.sources) if resp and getattr(resp, "sources", None) is not None else 0,
+            "no_source": not (resp.sources if resp and getattr(resp, "sources", None) else []),
+            "cached": cached,
+            "stream": stream,
+            "standalone": (getattr(resp, "standalone_question", None) or "")[:200] if resp else "",
+        }
+        with open(cfg.LOG_DIR / "chat.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception as e:
+        print(f"[metrics] log failed: {e}")
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(req: ChatRequest, request: Request, user: Dict = Depends(require_user)):
+    from backend.infra import cache as _cache
+    t0 = time.time()
+    _guard_rate_quota(request, user)
+    _guard_rbac(req, user)
+    _guard_owner(req, user)
+    ckey = _cacheable(req)
+    if ckey:
+        hit = _cache.get(ckey)
+        if hit is not None:
+            _log_chat(user, req, hit, time.time() - t0, cached=True)
+            return hit
+    try:
+        resp = await _chat_impl(req, request, user)
     except Exception:
-        pass
+        _log_chat(user, req, None, time.time() - t0)
+        raise
+    if ckey and getattr(resp, "sources", None):
+        _cache.put(ckey, resp)
+    _log_chat(user, req, resp, time.time() - t0)
+    return resp
+
+
+async def _chat_impl(req: ChatRequest, request: Request, user: Optional[Dict]):
     # Backend validation: AI chỉ đề xuất, backend kiểm tra lại (Least Privilege)
     try:
         req.question = validate_question(req.question)
@@ -872,7 +1298,7 @@ async def chat(req: ChatRequest, request: Request):
             if c == 0 or len(files) == 0:
                 sid = _get_or_create_session(req.session_id) if req.session_id or req.history else None
                 return ChatResponse(
-                    answer="Chua co du lieu de tra loi. Vui long chay: python -m backend.clean && python -m backend.index --rebuild, sau do thu lai.",
+                    answer="Chua co du lieu de tra loi. Vui long chay: python -m backend.cli clean && python -m backend.cli index --rebuild, sau do thu lai.",
                     sources=[],
                     context=[] if req.show_context else None,
                     session_id=sid,
@@ -1117,7 +1543,7 @@ async def chat(req: ChatRequest, request: Request):
                         is_social=is_social_res,
                     )
                 return ChatResponse(
-                    answer="Chua co du lieu de tra loi. Vui long chay: python -m backend.clean && python -m backend.index --rebuild, sau do thu lai.",
+                    answer="Chua co du lieu de tra loi. Vui long chay: python -m backend.cli clean && python -m backend.cli index --rebuild, sau do thu lai.",
                     sources=[],
                     context=[] if req.show_context else None,
                     session_id=session_id,
@@ -1245,7 +1671,7 @@ async def chat(req: ChatRequest, request: Request):
                             is_social=is_social_res_single,
                         )
                 return ChatResponse(
-                    answer="Chua co du lieu de tra loi. Vui long chay: python -m backend.clean && python -m backend.index --rebuild, sau do thu lai.",
+                    answer="Chua co du lieu de tra loi. Vui long chay: python -m backend.cli clean && python -m backend.cli index --rebuild, sau do thu lai.",
                     sources=[],
                     context=[] if req.show_context else None,
                     session_id=session_id,
@@ -1293,7 +1719,7 @@ async def chat(req: ChatRequest, request: Request):
         if "dimension" in msg:
             raise HTTPException(
                 status_code=500,
-                detail="Loi dimension embedding. Hay chay: python -m backend.index --rebuild (hoac backend.build_index). Chi tiet: " + str(e),
+                detail="Loi dimension embedding. Hay chay: python -m backend.cli index --rebuild. Chi tiet: " + str(e),
             )
         # Ollama OOM - RAM/VRAM không đủ
         if any(k in msg for k in ["out-of-memory", "failed to allocate", "ggml", "memory"]):
@@ -1312,16 +1738,12 @@ async def chat(req: ChatRequest, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/chat/stream")
-async def chat_stream(req: ChatRequest, request: Request):
+async def chat_stream(req: ChatRequest, request: Request, user: Dict = Depends(require_user)):
     """Streaming chat - trả chữ dần dần để người dùng thấy phản hồi nhanh hơn."""
-    # Rate limit
-    try:
-        ip = request.client.host if request.client else "unknown"
-        _check_rate_limit(ip)
-    except HTTPException:
-        raise
-    except Exception:
-        pass
+    t0 = time.time()
+    _guard_rate_quota(request, user)
+    _guard_rbac(req, user)
+    _guard_owner(req, user)
     # Validate như /api/chat
     try:
         req.question = validate_question(req.question)
@@ -1350,8 +1772,9 @@ async def chat_stream(req: ChatRequest, request: Request):
         except Exception:
             pass
         if is_simple:
-            # Dùng luôn endpoint thường
-            res = await chat(req)
+            # Dùng luôn logic chat thường
+            res = await _chat_impl(req, request, user)
+            _log_chat(user, req, res, time.time() - t0, stream=True)
             async def _simple_gen():
                 import json as _j
                 yield f"data: {_j.dumps({'token': res.answer}, ensure_ascii=False)}\n\n"
@@ -1373,11 +1796,11 @@ async def chat_stream(req: ChatRequest, request: Request):
 
         from backend.generation.rag import answer_with_history, answer
         from backend.generation.generator import _call_ollama_stream
-        from backend.indexing.retriever import retrieve
+        from backend.indexing.retrieval import retrieve
         from backend.generation.reranker import rerank
         from backend.generation.generator import rewrite_query
         from backend.generation.prompts import build_messages_with_history, build_messages
-        from backend.config import RETRIEVE_TOP_K
+        from backend.config.settings import RETRIEVE_TOP_K
 
         # Chuẩn bị context nhanh
         async def _gen():
@@ -1433,14 +1856,14 @@ async def chat_stream(req: ChatRequest, request: Request):
 async def trigger_clean():
     """Trigger clean (preprocessing) - async demo, thuc te nen chay background task"""
     try:
-        from backend.preprocessing.clean_service import show_stats
+        from backend.preprocessing.pipeline import show_stats
         # Just return stats, not actually run clean (can be long)
-        return {"message": "Dung: python -m backend.clean", "stats": _get_stats()}
+        return {"message": "Dung: python -m backend.cli clean", "stats": _get_stats()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 # Mount frontend static files if exists (phuc vu giao dien)
-frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
+frontend_dir = Path(__file__).resolve().parent.parent.parent / "frontend"
 if frontend_dir.exists():
     # Luon doc index.html hien tai va khong de trinh duyet giu giao dien cu.
     @app.get("/", include_in_schema=False)
@@ -1475,4 +1898,4 @@ if __name__ == "__main__":
     # Tuy nhien in them 1 lan o day de nguoi dung thay ngay khi go lenh (truoc khi reload)
     # lifespan se in lan 2 sau khi reload xong - chap nhan duplicate 1 lan de hien thi som
 
-    uvicorn.run("backend.app:app", host=args.host, port=args.port, reload=not args.no_reload)
+    uvicorn.run("backend.api:app", host=args.host, port=args.port, reload=not args.no_reload)

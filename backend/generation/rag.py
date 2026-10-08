@@ -9,7 +9,7 @@ Nhiệm vụ:
   * answer_with_history(): trả lời có ngữ cảnh hội thoại (viết lại câu hỏi, quản lý cửa sổ lịch sử và tóm tắt)
 """
 
-from backend.config import (
+from backend.config.settings import (
     RETRIEVE_TOP_K,
     CONVERSATION_WINDOW,
     CONVERSATION_SUMMARY_THRESHOLD,
@@ -17,16 +17,16 @@ from backend.config import (
     DEFAULT_STYLE,
 )
 from backend.generation.generator import generate, generate_with_history, generate_social, is_social_question, is_history_recall_question, rewrite_query, summarize_history, detect_style_change, strip_style_instruction
-from backend.indexing.retriever import retrieve
+from backend.indexing.retrieval import retrieve
 try:
-    from backend.indexing.hybrid import hybrid_retrieve
-    from backend.indexing.bm25 import bm25_search
+    from backend.indexing.retrieval import hybrid_retrieve
+    from backend.indexing.retrieval import bm25_search
 except Exception:
     hybrid_retrieve = None
     bm25_search = None
 # Security: output validation defense in depth
 try:
-    from backend.security import validate_output, validate_sources, validate_tool_call
+    from backend.config.settings import validate_output, validate_sources, validate_tool_call
 except Exception:
     def validate_output(x, max_len=4000): return x[:max_len] if x else x
     def validate_sources(x): return x
@@ -48,7 +48,7 @@ except Exception:
 
 def _use_hybrid() -> bool:
     try:
-        import backend.config as _cfg
+        import backend.config.settings as _cfg
         retr = getattr(_cfg, "RETRIEVAL", {})
         if isinstance(retr, dict):
             return bool(retr.get("hybrid", True))
@@ -222,6 +222,73 @@ def _make_clarification(question: str, style: str | None = None) -> str:
     if any(p in q_low for p in ["nó", "cái đó", "cái này"]):
         return base + hints
     return base + hints
+
+
+def _use_agent() -> bool:
+    try:
+        import backend.config.settings as _cfg
+        if not bool(getattr(_cfg, "USE_AGENT", True)):
+            return False
+    except Exception:
+        pass
+    try:
+        from backend.generation.agent import is_enabled
+        return bool(is_enabled())
+    except Exception:
+        return False
+
+
+def _manual_retrieve_generate(effective_question, standalone_q, category, top_k, use_rerank, rerank_k, history_window, summary, effective_style, session_id):
+    """Block manual cu (fallback khi agent tat/loi)."""
+    _top = top_k
+    if _top is None:
+        _top = DEFAULT_RERANK_TOP_K if (use_rerank and rerank) else RETRIEVE_TOP_K
+    fetch_k = min(_top * 5, 15) if use_rerank and rerank else _top
+    validate_tool_call("retrieve", {"category": category, "top_k": _top})
+    query_for_retrieval = standalone_q if standalone_q and standalone_q.strip() else effective_question
+    context = _do_retrieve(query_for_retrieval, category=category, top_k=fetch_k, session_id=session_id)
+    context = _ensure_trang_phuc_coverage(query_for_retrieval, context)
+    try:
+        from backend.common.utils import deduplicate_docs
+        context = deduplicate_docs(context, threshold=0.92)
+    except Exception:
+        pass
+    if not context:
+        clar = _make_clarification(effective_question, style=effective_style) + " (Hiện mình chưa tìm thấy tài liệu nào khớp với câu hỏi này, bạn có thể cho thêm chi tiết được không?)"
+        return {
+            "answer": validate_output(clar),
+            "sources": [],
+            "context": [],
+            "style": effective_style,
+            "standalone_question": standalone_q,
+            "summary": summary,
+            "history_used": history_window,
+            "needs_clarification": True,
+            "clarify_reason": "no_context",
+        }
+    if use_rerank and rerank and context:
+        try:
+            validate_tool_call("rerank", {"top_k": _top})
+            reranked = rerank(query_for_retrieval, context, top_k=rerank_k if rerank_k is not None else _top)
+            if reranked:
+                context = [{"text": c["text"], "metadata": c["metadata"], "score": c["score"]} for c in reranked[:10]]
+        except Exception as e:
+            print(f"[rag] rerank lỗi, giữ context gốc: {e}")
+    try:
+        text = validate_output(generate_with_history(context, effective_question, history_window, summary, style=effective_style))
+    except Exception as e:
+        err_msg = str(e) if isinstance(e, (str, ValueError, RuntimeError)) else f"{type(e).__name__}: {e}"
+        print(f"[rag] generate_with_history lỗi: {err_msg}")
+        raise RuntimeError(err_msg) from e
+    return {
+        "answer": text,
+        "sources": [c["metadata"] for c in context],
+        "context": context,
+        "standalone_question": standalone_q,
+        "summary": summary,
+        "history_used": history_window,
+        "style": effective_style,
+    }
 
 
 def answer(
@@ -426,7 +493,7 @@ def answer(
     context = _ensure_trang_phuc_coverage(query_for_retrieval, context)
     # Fallback dedup nếu retriever chưa dedup
     try:
-        from backend.utils.dedup import deduplicate_docs
+        from backend.common.utils import deduplicate_docs
         context = deduplicate_docs(context, threshold=0.92)
     except Exception:
         pass
@@ -707,62 +774,53 @@ def answer_with_history(
             "clarify_reason": _reason_h,
         }
 
-    if top_k is None:
-        top_k = DEFAULT_RERANK_TOP_K if (use_rerank and rerank) else RETRIEVE_TOP_K
-    fetch_k = min(top_k * 5, 15) if use_rerank and rerank else top_k
-    # Validate tool call trước khi retrieve (chỉ validate top_k gốc)
-    validate_tool_call("retrieve", {"category": category, "top_k": top_k})
-
-    query_for_retrieval = standalone_q if standalone_q and standalone_q.strip() else effective_question
-    context = _do_retrieve(query_for_retrieval, category=category, top_k=fetch_k, session_id=session_id)
-    context = _ensure_trang_phuc_coverage(query_for_retrieval, context)
-    try:
-        from backend.utils.dedup import deduplicate_docs
-        context = deduplicate_docs(context, threshold=0.92)
-    except Exception:
-        pass
-
-    # Nếu không tìm thấy ngữ cảnh nào khớp, hỏi lại thay vì bịa
-    if not context:
-        clar = _make_clarification(effective_question, style=effective_style) + " (Hiện mình chưa tìm thấy tài liệu nào khớp với câu hỏi này, bạn có thể cho thêm chi tiết được không?)"
-        return {
-            "answer": validate_output(clar),
-            "sources": [],
-            "context": [],
-            "style": effective_style,
-            "standalone_question": standalone_q,
-            "summary": summary,
-            "history_used": history_window,
-            "needs_clarification": True,
-            "clarify_reason": "no_context",
-        }
-
-    if use_rerank and rerank and context:
+    # Agent đa bước (LangGraph self-check, max AGENT_MAX_STEPS): thu truoc, loi -> manual
+    if _use_agent():
         try:
-            validate_tool_call("rerank", {"top_k": top_k})
-            reranked = rerank(query_for_retrieval, context, top_k=rerank_k if rerank_k is not None else top_k)
-            # Đảm bảo không rỗng sau rerank
-            if reranked:
-                context = [{"text": c["text"], "metadata": c["metadata"], "score": c["score"]} for c in reranked[:10]]
-            # Nếu rerank trả rỗng thì giữ nguyên context gốc
+            from backend.generation.agent import run_agent
+            _top = top_k
+            if _top is None:
+                _top = DEFAULT_RERANK_TOP_K if (use_rerank and rerank) else RETRIEVE_TOP_K
+            validate_tool_call("retrieve", {"category": category, "top_k": _top})
+            ag = run_agent(
+                effective_question, history=history_window, summary=summary,
+                style=effective_style, category=category,
+                top_k=(rerank_k if rerank_k is not None else _top),
+                use_rerank=bool(use_rerank), session_id=session_id,
+            )
+            ag_ctx = ag.get("context") or []
+            if not ag_ctx:
+                clar = _make_clarification(effective_question, style=effective_style) + " (Hiện mình chưa tìm thấy tài liệu nào khớp với câu hỏi này, bạn có thể cho thêm chi tiết được không?)"
+                return {
+                    "answer": validate_output(clar),
+                    "sources": [],
+                    "context": [],
+                    "style": effective_style,
+                    "standalone_question": ag.get("standalone_question", standalone_q),
+                    "summary": summary,
+                    "history_used": history_window,
+                    "needs_clarification": True,
+                    "clarify_reason": "no_context",
+                }
+            try:
+                ag_answer = validate_output(ag.get("answer", ""))
+            except Exception:
+                ag_answer = ag.get("answer", "")
+            return {
+                "answer": ag_answer,
+                "sources": ag.get("sources", [c.get("metadata", {}) for c in ag_ctx]),
+                "context": ag_ctx,
+                "standalone_question": ag.get("standalone_question", standalone_q),
+                "summary": summary,
+                "history_used": history_window,
+                "style": effective_style,
+                "agent_attempts": ag.get("attempts", 1),
+                "agent_retry_reason": ag.get("retry_reason", ""),
+            }
         except Exception as e:
-            print(f"[rag] rerank lỗi, giữ context gốc: {e}")
-            # giữ nguyên context gốc, không ném lỗi ra ngoài
+            print(f"[rag] agent fail, fallback manual: {e}")
 
-    try:
-        text = validate_output(generate_with_history(context, effective_question, history_window, summary, style=effective_style))
-    except Exception as e:
-        # Đảm bảo lỗi sinh không trả về object
-        err_msg = str(e) if isinstance(e, (str, ValueError, RuntimeError)) else f"{type(e).__name__}: {e}"
-        print(f"[rag] generate_with_history lỗi: {err_msg}")
-        raise RuntimeError(err_msg) from e
-
-    return {
-        "answer": text,
-        "sources": [c["metadata"] for c in context],
-        "context": context,
-        "standalone_question": standalone_q,
-        "summary": summary,
-        "history_used": history_window,
-        "style": effective_style,
-    }
+    return _manual_retrieve_generate(
+        effective_question, standalone_q, category, top_k, use_rerank, rerank_k,
+        history_window, summary, effective_style, session_id,
+    )

@@ -14,7 +14,7 @@ import re
 
 import numpy as np
 
-import backend.config as cfg
+import backend.config.settings as cfg
 CHUNK = cfg.CHUNK
 
 # Ngưỡng sàn an toàn - đoạn ngắn hơn sẽ cho véc-tơ nhiễu, không có giá trị truy hồi
@@ -149,7 +149,7 @@ def fast_chunk(
         fallback = [c for c in final if len(c) >= _MIN_FLOOR]
         if fallback:
             try:
-                from backend.utils.dedup import deduplicate_chunks
+                from backend.common.utils import deduplicate_chunks
                 fallback = deduplicate_chunks(fallback, threshold=cfg.CHUNK.get("dedup_threshold", 0.92), exact_only=cfg.CHUNK.get("dedup_exact_only", False))
             except Exception:
                 pass
@@ -158,7 +158,7 @@ def fast_chunk(
         if len(stripped) >= _MIN_FLOOR:
             return [stripped[:effective_max]]
     try:
-        from backend.utils.dedup import deduplicate_chunks
+        from backend.common.utils import deduplicate_chunks
         filtered = deduplicate_chunks(filtered, threshold=cfg.CHUNK.get("dedup_threshold", 0.92), exact_only=cfg.CHUNK.get("dedup_exact_only", False))
     except Exception:
         pass
@@ -293,7 +293,7 @@ def semantic_chunk(
         fallback = [c for c in final if len(c) >= _MIN_FLOOR]
         if fallback:
             try:
-                from backend.utils.dedup import deduplicate_chunks
+                from backend.common.utils import deduplicate_chunks
                 fallback = deduplicate_chunks(fallback, threshold=cfg.CHUNK.get("dedup_threshold", 0.92), exact_only=cfg.CHUNK.get("dedup_exact_only", False))
             except Exception:
                 pass
@@ -304,7 +304,7 @@ def semantic_chunk(
             return [stripped[:effective_max]]
     # Dedup cho semantic_chunk cũng cần để tránh lặp
     try:
-        from backend.utils.dedup import deduplicate_chunks
+        from backend.common.utils import deduplicate_chunks
         filtered = deduplicate_chunks(filtered, threshold=cfg.CHUNK.get("dedup_threshold", 0.92), exact_only=cfg.CHUNK.get("dedup_exact_only", False))
     except Exception:
         pass
@@ -564,7 +564,7 @@ def _generate_llm_context(chunk: str, heading: str, doc_snippet: str, metadata: 
     Fallback về heading nếu LLM lỗi.
     """
     try:
-        from backend.config import LLM_MODEL, OLLAMA_BASE
+        from backend.config.settings import LLM_MODEL, OLLAMA_BASE
         import requests
 
         doc_info = ""
@@ -785,7 +785,7 @@ def contextual_chunk(
         if fallback:
             # Dedup trước khi trả về để tránh lặp 20 bullet học bổng
             try:
-                from backend.utils.dedup import deduplicate_chunks
+                from backend.common.utils import deduplicate_chunks
                 fallback = deduplicate_chunks(fallback, threshold=cfg.CHUNK.get("dedup_threshold", 0.92), exact_only=cfg.CHUNK.get("dedup_exact_only", False))
             except Exception:
                 pass
@@ -794,7 +794,7 @@ def contextual_chunk(
             return [text.strip()[:effective_max]]
     # Dedup cuối cùng để loại chunk trùng do overlap + heading
     try:
-        from backend.utils.dedup import deduplicate_chunks
+        from backend.common.utils import deduplicate_chunks
         filtered = deduplicate_chunks(filtered, threshold=cfg.CHUNK.get("dedup_threshold", 0.92), exact_only=cfg.CHUNK.get("dedup_exact_only", False))
     except Exception:
         pass

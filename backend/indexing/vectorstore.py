@@ -9,7 +9,7 @@ Nhiệm vụ:
 """
 import chromadb
 
-import backend.config as cfg
+import backend.config.settings as cfg
 
 _client = None
 _client_path = None

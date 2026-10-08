@@ -19,5 +19,18 @@ uvicorn[standard]
 
 # Sinh cau tra loi: mac dinh dung Ollama (da cai san, chay `ollama pull qwen2.5`).
 # Khong can them package Python vi generator.py goi Ollama qua requests (co san).
-# Neu doi LLM_BACKEND="transformers" trong src/config.py thi can them: ollama
+# Neu doi LLM_BACKEND="transformers" trong backend/core.py thi can them: ollama
+
+# LangChain (tich hop incremental: ChatOllama + Prompt + LCEL + Memory).
+# Giu retrieval tieng Viet cu, chi boc Generation bang LangChain khi USE_LANGCHAIN=True.
+langchain
+langchain-core
+langchain-text-splitters
+langchain-chroma
+langchain-ollama
+langchain-huggingface
+rank-bm25
+
+# Agent đa bước (LangGraph self-check nguồn, tối đa AGENT_MAX_STEPS lần sinh)
+langgraph
 

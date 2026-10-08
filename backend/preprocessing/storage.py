@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import List, Dict, Generator
 
-import backend.config as cfg
+import backend.config.settings as cfg
 
 # Try import parquet libs
 try:

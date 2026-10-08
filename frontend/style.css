@@ -38,3 +38,8 @@ dialog{border:1px solid var(--line);border-radius:16px;background:var(--white);c
   .bubble .answer-body h1{font-size:17px}
   .bubble .answer-body h2{font-size:16px}
 }
+/* GĐ2 production: login dialog */
+.login-fields{display:flex;flex-direction:column;gap:10px;margin:6px 0 12px}
+.login-fields input{padding:10px 12px;border:1px solid var(--line);border-radius:9px;font-size:13px;background:var(--white);color:var(--ink)}
+.login-actions{display:flex;gap:8px;justify-content:flex-end}
+.btn.ghost{background:transparent;color:var(--ink)}

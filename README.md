@@ -41,7 +41,7 @@ Câu hỏi mới + Lịch sử
 ## 2. Cấu trúc dự án
 
 ```
-E:\test\
+E:\rag\
 ├── data/
 │   ├── classified/                 # Dữ liệu thô (PDF, DOCX) theo category
 │   │   ├── quyet_dinh/thanh_tra/
@@ -50,48 +50,66 @@ E:\test\
 │   │   ├── tai_lieu_huong_dan/dao_tao / ky_nang_sv/
 │   │   └── thong_bao/hoc_bong / hoc_phi / ky_thi/
 │   ├── processed/                  # Artifact sau tiền xử lý: *.parquet
-│   │   └── .indexed.json           # manifest mtime cho build incremental
-│   └── chroma_db/                  # (thực tế ở repo root: chroma_db/)
+│   │   └── .indexed.json           # manifest mtime (key posix) cho build incremental
+│   ├── uploads/                    # File upload theo phiên (không commit)
 ├── backend/
-│   ├── config.py                   # Cấu hình chung (đường dẫn, model, chunk, hội thoại)
-│   ├── app.py                      # FastAPI - API + serve frontend, quản lý session
-│   ├── answer.py                   # CLI hỏi-đáp (hỗ trợ lịch sử tương tác)
-│   ├── test.py                     # CLI kiểm tra chunking/embedding
-│   ├── clean.py                    # Alias cho preprocessing/clean_service
-│   ├── index.py                    # Entry indexing (build incremental / --rebuild)
+│   ├── api/app.py                  # Giao diện HTTP: FastAPI + serve frontend, quản lý session
+│   ├── cli/main.py                 # Giao diện CLI: clean / index (python -m backend.cli <clean|index>)
+│   ├── config/settings.py          # Cấu hình chung + security dùng chung (trước đây core.py)
+│   ├── common/utils.py             # dedup (chuẩn hóa + loại trùng lặp, trước đây utils.py)
+│   ├── security/auth.py            # Xác thực + phân quyền (trước đây auth.py)
+│   ├── infra/cache.py              # Cache câu hỏi lặp (trước đây cache.py)
+│   ├── core.py / utils.py /        # Shim tương thích (re-export, giữ import cũ chạy được)
+│   │   auth.py / cache.py / agent.py
 │   ├── preprocessing/              # PHẦN 1: Tiền xử lý
 │   │   ├── loader.py               # PDF (pymupdf + OCR easyocr) & DOCX
 │   │   ├── cleaner.py              # Bỏ header/footer, số trang, quốc huy
 │   │   ├── chunker.py              # Semantic + Contextual chunking
-│   │   ├── pipeline.py             # process_file/process_all → *.parquet
+│   │   ├── pipeline.py             # process_file/process_all → *.parquet (+ clean_*, show_stats, CLI)
 │   │   ├── storage.py              # Helper parquet (đọc/ghi, hỗ trợ jsonl cũ)
-│   │   ├── clean_service.py        # Logic cho clean.py
-│   │   └── preprocess.py           # Bí danh cho pipeline
 │   ├── indexing/                   # PHẦN 2: Indexing
 │   │   ├── embedder.py             # dangvantuan/vietnamese-embedding
 │   │   ├── vectorstore.py          # ChromaDB persistent
-│   │   └── retriever.py            # Truy xuất top-k
-│   └── generation/                 # PHẦN 3: Generation
-│       ├── prompts.py              # SYSTEM_PROMPT, build_messages, rewrite/summary prompts
-│       ├── generator.py            # Ollama / transformers, rewrite_query, summarize_history
-│       ├── reranker.py             # cross-encoder ms-marco-MiniLM-L-6-v2 (top_k=3)
-│       ├── rag.py                  # Điều phối retrieve → rerank → generate (answer / answer_with_history)
-│       └── test_service.py         # Logic cho test.py
+│   │   └── retrieval.py            # Cụm truy xuất: vector + BM25 + hybrid
+│   ├── generation/                 # PHẦN 3: Generation
+│   │   ├── agent.py                # Agent đa bước (LangGraph self-check, max AGENT_MAX_STEPS)
+│   │   ├── prompts.py              # SYSTEM_PROMPT, build_messages, rewrite/summary prompts
+│   │   ├── generator.py            # Ollama / transformers, rewrite_query, summarize_history
+│   │   ├── langchain_chain.py      # Adapter LangChain (ChatOllama + LCEL)
+│   │   ├── reranker.py             # cross-encoder ms-marco-MiniLM-L-6-v2
+│   │   ├── rag.py                  # Điều phối retrieve → rerank → generate (agent-first, fallback manual)
+│   │   ├── calculator.py           # Tính toán chính xác bằng Decimal
+├── tools/                          # Vận hành (trước đây scripts/)
+│   ├── data/rebuild_data.py        # Rebuild toàn bộ: clean + index --rebuild + verify
+│   ├── eval/eval_quick.py          # Đánh giá nhanh qua HTTP API
+│   └── ops/backup.py               # Backup/restore chroma + processed + sessions + users
+├── infra/nginx/
+│   └── nginx.conf                  # Reverse proxy + TLS nội bộ (trước đây deploy/nginx.conf)
+├── docs/
+│   └── deploy.md                   # Hướng dẫn triển khai production (trước đây deploy/README.md)
 ├── frontend/
 │   ├── index.html                  # Giao diện chat 3 cột (sidebar - chat - nguồn)
 │   ├── style.css                   # Dark theme, responsive
 │   └── app.js                      # Gọi /api/chat, quản lý localStorage + session + typewriter
-├── chroma_db/                      # ChromaDB persistent
+├── chroma_db/                      # ChromaDB persistent (không commit)
 ├── requirements.txt
 └── README.md
 ```
 
+| Chạy nhanh | Lệnh |
+|---|---|
+| Rebuild toàn bộ data | `python tools/data/rebuild_data.py` |
+| Chỉ clean | `python -m backend.cli clean` |
+| Chỉ index | `python -m backend.cli index --rebuild` |
+| Kiểm tra | `python -m backend.cli clean --stats` (xem /api/health để biết số files/vectors) |
+| Chạy API | `uvicorn backend.api:app --reload --port 8000` |
+
 | Phần | Nhiệm vụ | Input → Output | Thư mục |
 |------|----------|----------------|---------|
 | **Tiền xử lý** | Làm sạch & chunk | `data/classified` → `data/processed/*.parquet` | `backend/preprocessing/` |
-| **Indexing** | Embed → Vector Store | `data/processed/*.parquet` → `chroma_db/` | `backend/indexing/` + `backend/index.py` |
+| **Indexing** | Embed → Vector Store | `data/processed/*.parquet` → `chroma_db/` | `backend/indexing/` + `backend/cli/main.py` |
 | **Generation** | Rerank + Prompt + LLM | `query (+ history)` → `{answer, sources}` | `backend/generation/` |
-| **API** | FastAPI + Session | `HTTP` → `JSON` | `backend/app.py` |
+| **API** | FastAPI + Session | `HTTP` → `JSON` | `backend/api/app.py` |
 | **Frontend** | Giao diện chat | Người dùng → API | `frontend/` |
 
 ---
@@ -141,39 +159,31 @@ ollama serve               # chạy ở terminal riêng
 
 ### 6.1 Tiền xử lý
 ```powershell
-python -m backend.clean                 # toàn bộ data/classified → data/processed/*.parquet
-python -m backend.clean --stats         # xem thống kê
-python -m backend.clean --dry-run       # chỉ thử, không ghi
+python -m backend.cli clean                 # toàn bộ data/classified → data/processed/*.parquet
+python -m backend.cli clean --stats         # xem thống kê
+python -m backend.cli clean --dry-run       # chỉ thử, không ghi
 
 # Trong Python
 from backend.preprocessing.pipeline import process_all
-from backend.config import DATA_DIR
+from backend.config.settings import DATA_DIR
 process_all(DATA_DIR)
 ```
 
 ### 6.2 Indexing
 ```powershell
-python -m backend.index                 # build incremental
-python -m backend.index --rebuild       # build lại toàn bộ
+python -m backend.cli index                 # build incremental
+python -m backend.cli index --rebuild       # build lại toàn bộ
 ```
 
 ### 6.3 Hỏi-đáp CLI
 
-**Đơn lượt:**
+**Đơn lượt (trong Python hoặc qua API — không còn CLI riêng):**
 ```powershell
-python -m backend.answer --question "Quy chế đào tạo là gì?" --show-context
-python -m backend.test --chunks --embeddings
-python -m backend.test -q "Học bổng xét thế nào?" --show-context
+# Hỏi qua API đang chạy:
+curl -X POST http://localhost:8000/api/chat -H "Content-Type: application/json" -d '{"question":"Quy chế đào tạo là gì?","use_rerank":true,"show_context":true}'
 ```
 
-**Hội thoại (CLI tương tác):**
-```powershell
-python -m backend.answer
-# Ban: Quy chế đào tạo là gì?
-# Ban: Điều kiện tốt nghiệp trong nó là gì?   # sẽ tự rewrite
-# Ban: history   # xem lịch sử
-# Ban: clear     # xóa lịch sử
-```
+**Hội thoại nhiều lượt:** dùng giao diện web (`http://localhost:8000/`, mỗi phiên có `session_id` riêng, hỗ trợ `New chat`) hoặc truyền `history` + `session_id` qua `POST /api/chat`.
 
 Trong Python:
 ```python
@@ -196,13 +206,13 @@ print(res["answer"])
 
 ```powershell
 # 1. Chuẩn bị dữ liệu
-python -m backend.clean
-python -m backend.index --rebuild
+python -m backend.cli clean
+python -m backend.cli index --rebuild
 
 # 2. Chạy API (phục vụ cả frontend)
-uvicorn backend.app:app --reload --port 8000
+uvicorn backend.api:app --reload --port 8000
 # hoặc
-python -m backend.app
+python -m backend.api
 
 # 3. Mở trình duyệt
 # Frontend:   http://localhost:8000/
@@ -272,7 +282,7 @@ curl -X POST http://localhost:8000/api/chat \
 
 ## 8. Frontend
 
-`frontend/` là trang tĩnh thuần HTML/CSS/JS, không cần build, được serve bởi `backend/app.py` qua `StaticFiles(html=True)`.
+`frontend/` là trang tĩnh thuần HTML/CSS/JS, không cần build, được serve bởi `backend/api/app.py` qua `StaticFiles(html=True)`.
 
 *   `index.html` — Layout 3 cột: sidebar lịch sử + chat chính + panel nguồn (right drawer). Đã **loại bỏ khối cấu hình RAG** (category/top_k/rerank) khỏi giao diện; các giá trị dùng mặc định (`top_k=3`, `rerank=true`, `luôn nhớ hội thoại`). Hỗ trợ gõ `quy_che: câu hỏi` để lọc danh mục ngay trong ô chat.
 *   `style.css` — Dark theme, responsive (sidebar thành drawer trên mobile).
@@ -280,7 +290,7 @@ curl -X POST http://localhost:8000/api/chat \
 
 ---
 
-## 9. Cấu hình (`backend/config.py`)
+## 9. Cấu hình (`backend/config/settings.py`)
 
 ```python
 DATA_DIR = BASE_DIR / "data" / "classified"
@@ -319,11 +329,24 @@ SUMMARY_MAX_TOKENS = 256
 
 *   **Parquet:** `storage.py` đọc được cả `parquet` và `jsonl` cũ để migrate: `python -m backend.preprocessing.storage --migrate` (cần `pandas` + `pyarrow` đã có trong `requirements.txt`).
 *   **Ollama lỗi:** Nếu gặp `out-of-memory` → đổi `LLM_MODEL` sang `qwen2.5:1.5b`/`0.5b`; nếu `connection refused` → kiểm tra `ollama serve` và `ollama list`.
-*   **Dimension mismatch:** Chạy `python -m backend.index --rebuild` sau khi đổi `EMBED_MODEL`.
+*   **Dimension mismatch:** Chạy `python -m backend.cli index --rebuild` sau khi đổi `EMBED_MODEL`.
 *   **Session:** In-memory, TTL 24h, tối đa 200 phiên, mỗi phiên tối đa 100 messages; xóa bằng `DELETE /api/sessions/{id}` hoặc nút `New chat` (xóa cả server + localStorage).
 
 ---
 
-## 11. Giấy phép
+## 11. Van hanh production (server noi bo)
+
+Chi tiet day du: `docs/deploy.md`. Tom tat:
+
+*   **Chay bang Docker:** `cp .env.example .env` (sua `ADMIN_PASSWORD`) → `docker compose up -d --build` → `docker compose exec ollama ollama pull qwen2.5:1.5b` → nap data (`backend.cli clean` + `index --rebuild`) → kiem tra `/api/health`.
+*   **Dang nhap (khuyen nghi):** bat `AUTH_ENABLED=true`, admin bootstrap tu `.env`; tao user theo phong ban voi `categories` cho phep (`POST /api/auth/users`); frontend tu hien form login khi gap 401.
+*   **Giam sat:** `GET /api/health` (`ollama_ok`, `disk_free_gb`), `GET /api/metrics` (admin: latency p50/p95, no-source rate, cache hit), log chi tiet moi hoi dap o `data/logs/chat.jsonl`.
+*   **Backup:** `python tools/ops/backup.py --backup --keep 7` (chroma + processed + sessions + users); khoi phuc bang `--restore`. Nen cron hang dem.
+*   **Cap nhat tai lieu:** bo file da duyet vao `data/classified/` → chay `clean` + `index` (incremental) → kiem tra health + hoi thu → ghi log thay doi.
+*   **Danh gia nhanh sau moi lan doi model:** `python tools/eval/eval_quick.py` (bao loi khi no-source > 40%).
+
+---
+
+## 12. Giấy phép
 
 Dự án nội bộ Học viện Kỹ thuật Mật mã.

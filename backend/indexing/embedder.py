@@ -24,8 +24,8 @@ logging.getLogger("huggingface_hub").setLevel(logging.CRITICAL)
 logging.getLogger("torch").setLevel(logging.ERROR)
 logging.disable(logging.WARNING)
 
-import backend.config as cfg
-from backend.config import DEVICE, EMBED_MODEL
+import backend.config.settings as cfg
+from backend.config.settings import DEVICE, EMBED_MODEL
 
 _model = None
 _runtime_device = None

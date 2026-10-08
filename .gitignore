@@ -23,15 +23,27 @@ env/
 .DS_Store
 Thumbs.db
 
-# RAG - keep data and db tracked, but ignore temp versions/history if needed
-# Uncomment to ignore:
-# chroma_db/
-# data/processed/.versions/
-# data/processed/.history.jsonl
+# RAG - artifacts regenerable (rebuild via tools/data/rebuild_data.py)
+chroma_db/
+checkpoints/
+data/uploads/
+data/processed_uploads/
+data/processed/.versions/
 
 # Sessions - persistent chat sessions (không commit)
 data/sessions.json
 data/sessions.tmp
+
+# Production - secrets & runtime data (không commit)
+.env
+data/users.json
+data/users.tmp
+data/logs/
+data/rate.json
+backups/
+*.pem
+*.key
+*.crt
 
 # Node
 node_modules/

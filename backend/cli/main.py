@@ -1,38 +1,60 @@
 """
-backend/index.py - Entry point cho indexing
-============================================
-Nhiệm vụ:
-- Xây dựng và cập nhật vector store từ data/processed (parquet).
-- Điều phối các module con:
-  * indexing/embedder.py    -> tạo embedding
-  * indexing/vectorstore.py -> quản lý collection ChromaDB
-  * indexing/retriever.py   -> truy xuất
-- Hỗ trợ build incremental dựa trên manifest + mtime và chế độ --rebuild để embed lại toàn bộ.
+backend/cli.py - Entry points CLI (gop tu cli/clean.py + cli/index.py)
+=======================================================================
+- clean: tien xu ly data tho -> data sach (logic trong preprocessing.pipeline)
+- index: build vector store tu data/processed (parquet -> ChromaDB)
 
-Chạy:
-  python -m backend.index              # build incremental
-  python -m backend.index --rebuild    # build lại toàn bộ
-  python backend/index.py --rebuild
+Chay:
+  python -m backend.cli clean                 # lam sach toan bo data/classified
+  python -m backend.cli clean --stats         # chi xem thong ke
+  python -m backend.cli index                 # build incremental
+  python -m backend.cli index --rebuild       # build lai toan bo
 """
+import argparse
 import json
 import os
 import sys
-import argparse
-from pathlib import Path
+import warnings
+import logging
 from collections import Counter
+from pathlib import Path
 
-# Fix import khi chạy trực tiếp
+# Tat warning truoc khi import bat ky thu vien nao - chi hien thi tien trinh
+warnings.filterwarnings("ignore")
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
+logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+
+# Fix import khi chay truc tiep
 if __package__ in (None, ""):
-    _ROOT = Path(__file__).resolve().parent.parent
+    _ROOT = Path(__file__).resolve().parent.parent.parent
     if str(_ROOT) not in sys.path:
         sys.path.insert(0, str(_ROOT))
 
-import backend.config as cfg
+# Dam bao stdout UTF-8 tren Windows
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 
-# Xuất lại các hàm từ các module indexing để dùng qua backend.index
-# embedder
+import backend.config.settings as cfg
+
+# ── clean: chi goi preprocessing.pipeline (khong xu ly logic tai day) ──
+from backend.preprocessing.pipeline import (
+    clean_all,
+    clean_single_file,
+    main as clean_main,
+    show_stats,
+)
+
+# ── index: embedder / vectorstore / retrieval ──
 from backend.indexing.embedder import embed, get_model_info, get_dimension
-# vectorstore
 from backend.indexing.vectorstore import (
     get_client,
     get_collection,
@@ -44,25 +66,35 @@ from backend.indexing.vectorstore import (
     get_by_ids,
     query_by_category,
 )
-# retriever
-from backend.indexing.retriever import retrieve
-
-# Đảm bảo stdout UTF-8 trên Windows
-try:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8")
-except Exception:
-    pass
+from backend.indexing.retrieval import retrieve
 
 
 # Logic build vector store
+def _mkey(src: str) -> str:
+    """Khoa manifest chuan posix (tuong thich manifest cu Windows backslash)."""
+    try:
+        return Path(str(src)).as_posix()
+    except Exception:
+        return str(src).replace("\\", "/")
+
+
+def _msrc(src: str) -> Path:
+    """Resolve source chunk thanh Path tuyet doi (ho tro ca relative nhu manifest cu)."""
+    p = Path(str(src))
+    if p.is_absolute():
+        return p
+    try:
+        return cfg.BASE_DIR / p
+    except Exception:
+        return p
+
+
 def _load_manifest() -> dict:
     manifest = cfg.INDEXED_MANIFEST
     if manifest.exists():
         try:
-            return json.loads(manifest.read_text(encoding="utf-8"))
+            raw = json.loads(manifest.read_text(encoding="utf-8"))
+            return {_mkey(k): v for k, v in raw.items()}
         except Exception:
             return {}
     return {}
@@ -91,9 +123,13 @@ def build(rebuild: bool = False) -> None:
     to_embed = []
     for ch in _iter_chunks():
         src = ch["source"]
-        mtime = Path(src).stat().st_mtime if Path(src).exists() else 0.0
-        seen[src] = mtime
-        if not rebuild and src in manifest and manifest[src] == mtime:
+        key = _mkey(src)
+        try:
+            mtime = _msrc(src).stat().st_mtime if _msrc(src).exists() else 0.0
+        except Exception:
+            mtime = 0.0
+        seen[key] = mtime
+        if not rebuild and key in manifest and manifest[key] == mtime:
             continue
         to_embed.append(ch)
 
@@ -186,40 +222,73 @@ def build(rebuild: bool = False) -> None:
         pass
 
 
-def build_parser():
+def build_index_parser():
     p = argparse.ArgumentParser(
-        prog="backend.index",
-        description="Indexing - build vector store từ data/processed (thay thế indexing/build_index.py)",
+        prog="backend.cli index",
+        description="Indexing - build vector store từ data/processed",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=(
             "Ví dụ:\n"
-            "  python -m backend.index --rebuild\n"
-            "  python -m backend.index\n"
-            "  python backend/index.py --rebuild\n"
+            "  python -m backend.cli index --rebuild\n"
+            "  python -m backend.cli index\n"
         ),
     )
     p.add_argument("--rebuild", action="store_true", help="Xóa collection cũ và embed lại toàn bộ")
     return p
 
 
-def main(argv=None):
-    parser = build_parser()
+def index_main(argv=None):
+    parser = build_index_parser()
     args = parser.parse_args(argv)
     build(rebuild=args.rebuild)
     return 0
 
 
+# ── Dispatcher: python -m backend.cli <clean|index> ──
+# Subcommand clean co parser rieng phuc tap (positional path + options) nen dispatcher
+# chi tach ten lenh, phan options do clean_main/index_main tu parse (giu 100% behavior cu).
+
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="backend.cli",
+        description="CLI RAG: clean (tien xu ly) | index (build vector store)",
+    )
+    p.add_argument("command", choices=["clean", "index"], help="clean: lam sach | index: build vector")
+    return p
+
+
+def main(argv=None):
+    # Subcommand clean co parser rieng phuc tap (positional path + options) nen dispatch thu cong
+    # de giu nguyen 100% behavior cu (khong mat option nao).
+    args = list(sys.argv[1:] if argv is None else argv)
+    if not args or args[0] in ("-h", "--help"):
+        print("Dung: python -m backend.cli <clean|index> [options]")
+        print("  clean  : python -m backend.cli clean [--stats|--dry-run|--show-sample] [path]")
+        print("  index  : python -m backend.cli index [--rebuild]")
+        return 0
+    cmd, rest = args[0], args[1:]
+    if cmd == "clean":
+        return clean_main(rest)
+    if cmd == "index":
+        return index_main(rest)
+    print(f"[cli] lenh khong ro: {cmd} (dung clean|index)", file=sys.stderr)
+    return 2
+
+
 __all__ = [
+    # clean (re-export tu pipeline)
+    "clean_single_file", "clean_all", "show_stats", "clean_main",
     # embedder
     "embed", "get_model_info", "get_dimension",
     # vectorstore
     "get_client", "get_collection", "add_chunks", "count", "reset_collection",
     "peek", "get_stats", "get_by_ids", "query_by_category",
-    # retriever
+    # retrieval
     "retrieve",
     # build
-    "build", "main", "build_parser",
+    "build", "index_main", "build_index_parser", "main", "build_parser",
 ]
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

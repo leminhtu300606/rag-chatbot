@@ -24,7 +24,7 @@
       <nav id="history-list" class="history-list" aria-label="Lịch sử hội thoại"></nav>
       <div class="sidebar-footer">
         <div class="system-status"><span id="health-badge" class="dot warn"></span><div><strong id="health-text">Đang kiểm tra hệ thống</strong><span id="history-badge">0 lượt • phiên mới</span></div></div>
-        <div class="account-row"><span class="account-avatar">HV</span><span class="account-copy"><strong>Học viên KTMM</strong><small id="llm-info">Đang kết nối mô hình</small></span><button class="icon-btn" id="stats-btn" title="Thống kê hệ thống"><i class="fa-solid fa-ellipsis"></i></button></div>
+        <div class="account-row"><span class="account-avatar">HV</span><span class="account-copy"><strong id="account-name">Học viên KTMM</strong><small id="llm-info">Đang kết nối mô hình</small></span><button class="icon-btn" id="login-btn" title="Đăng nhập/đăng xuất"><i class="fa-solid fa-user"></i></button><button class="icon-btn" id="stats-btn" title="Thống kê hệ thống"><i class="fa-solid fa-ellipsis"></i></button></div>
         <div id="session-info" class="session-info"></div>
       </div>
     </aside>
@@ -47,6 +47,7 @@
   </div>
   <div id="sources-backdrop" class="sources-backdrop hidden"></div>
   <dialog id="stats-modal"><form method="dialog"><div class="dialog-title"><span class="example-icon blue"><i class="fa-solid fa-chart-simple"></i></span><h3>Thống kê hệ thống</h3></div><pre id="stats-pre">Đang tải...</pre><button class="btn">Đóng</button></form></dialog>
+  <dialog id="login-modal"><form method="dialog" id="login-form"><div class="dialog-title"><span class="example-icon mint"><i class="fa-solid fa-user"></i></span><h3>Đăng nhập</h3></div><div class="login-fields"><input id="login-user" autocomplete="username" placeholder="Tên đăng nhập" /><input id="login-pass" type="password" autocomplete="current-password" placeholder="Mật khẩu" /><div id="login-err" class="hint"></div></div><div class="login-actions"><button class="btn" id="login-go" value="default">Đăng nhập</button><button class="btn ghost" id="login-close" value="cancel" formnovalidate>Đóng</button></div></form></dialog>
   <script src="app.js?v=20260912"></script>
 </body>
 </html>

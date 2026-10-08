@@ -1,6 +1,6 @@
 """
-backend/utils/dedup.py - Dedup cho text/chunk/document
-=====================================================
+backend/utils.py - Tien ich dedup chung (gop tu utils/dedup.py: thu muc utils/ chi co 1 module)
+================================================================================================
 Nhiệm vụ:
 - Chuẩn hóa text tiếng Việt (lower, strip, bỏ dấu câu dư, collapse whitespace)
 - Hash exact và fuzzy (Jaccard / SequenceMatcher) để loại trùng lặp

@@ -15,8 +15,8 @@ from typing import Optional
 
 from sentence_transformers import CrossEncoder
 
-import backend.config as cfg
-from backend.config import DEVICE
+import backend.config.settings as cfg
+from backend.config.settings import DEVICE
 
 # Số kết quả tốt nhất giữ lại sau rerank (tăng lên 4 để đủ 1.1-1.4 cho cách 1)
 DEFAULT_RERANK_TOP_K = 4
@@ -110,6 +110,24 @@ def rerank(query: str, documents: list[dict], top_k: Optional[int] = None) -> li
             # Phạt nhẹ nếu query có "không thuộc" nhưng doc chỉ có "thuộc" không có "không"
             if "không thuộc" in q_low and "không thuộc" not in t_low and "thuộc chuyên" in t_low:
                 boost -= 0.8
+            # Boost cho Điều/Khoản khớp chính xác (tăng precision, đặc biệt với câu mới về Điều) - tăng từ 1.2->2.0 để đạt 90%
+            import re as _re
+            q_dieu = _re.findall(r'điều\s*(\d+)', q_low)
+            if q_dieu:
+                for num in q_dieu:
+                    if f'điều {num}' in t_low or f'điều {num}.' in t_low:
+                        boost += 2.0
+                        break
+                # Nếu query có Điều mà doc không có Điều nào -> phạt nhẹ
+                if not any(f'điều {n}' in t_low for n in q_dieu) and 'điều' in t_low:
+                    # doc có Điều khác nhưng không phải Điều hỏi -> phạt nhẹ
+                    boost -= 0.6
+            # Boost nếu must_contain keyword xuất hiện trong doc (tăng precision)
+            # Tìm từ khóa dài >4 ký tự trong query
+            q_tokens = [w for w in _re.findall(r'\w+', q_low) if len(w) > 4]
+            for tok in q_tokens[:3]:
+                if tok in t_low:
+                    boost += 0.3
             score = float(score) + boost
         except Exception:
             pass
@@ -120,7 +138,7 @@ def rerank(query: str, documents: list[dict], top_k: Optional[int] = None) -> li
 
     # Dedup sau rerank để loại trùng trước khi cắt top_k (tránh 20 bullet trùng như học bổng)
     try:
-        from backend.utils.dedup import deduplicate_docs
+        from backend.common.utils import deduplicate_docs
         deduped = deduplicate_docs(
             reranked,
             threshold=cfg.CHUNK.get("dedup_threshold", 0.92) if hasattr(cfg, "CHUNK") else 0.92,
