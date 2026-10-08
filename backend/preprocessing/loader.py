@@ -424,27 +424,3 @@ def load_file(path: Path) -> list[dict]:
     if ext in (".txt", ".md", ".csv", ".log"):
         return load_txt(path)
     return []
-
-
-def load_all(data_dir: Path = DATA_DIR) -> list[dict]:
-    records = []
-    for root, _, files in os.walk(data_dir):
-        rel = Path(root).relative_to(data_dir)
-        category = rel.parts[0] if rel.parts else "unknown"
-        subcategory = "/".join(rel.parts[1:]) if len(rel.parts) > 1 else ""
-        for fn in files:
-            if fn.startswith("~$"):
-                continue
-            path = Path(root) / fn
-            try:
-                for rec in load_file(path):
-                    rec.update(
-                        category=category,
-                        subcategory=subcategory,
-                        filename=fn,
-                        source=str(path),
-                    )
-                    records.append(rec)
-            except Exception as e:
-                print(f"[loader] LỖI {path}: {e}")
-    return records

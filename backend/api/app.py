@@ -25,7 +25,7 @@ if __package__ in (None, ""):
         sys.path.insert(0, str(_ROOT))
 
 from typing import Optional, List, Dict, Any
-from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile, File, BackgroundTasks
+from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -43,7 +43,7 @@ import backend.config.settings as cfg
 from backend.config.settings import (
     validate_question, validate_category, validate_top_k, validate_session_id,
     validate_tool_call, validate_output, validate_sources,
-    sanitize_input, detect_injection,
+    sanitize_input,
 )
 from backend.security import auth as auth_mod
 from backend.security.auth import require_user, require_admin, get_current_user_opt
@@ -1248,8 +1248,12 @@ async def chat(req: ChatRequest, request: Request, user: Dict = Depends(require_
     return resp
 
 
-async def _chat_impl(req: ChatRequest, request: Request, user: Optional[Dict]):
-    # Backend validation: AI chỉ đề xuất, backend kiểm tra lại (Least Privilege)
+def _validate_chat_request(req: ChatRequest) -> None:
+    """Validate chung cho /api/chat và /api/chat/stream (Least Privilege).
+
+    Chuẩn hóa question/category/top_k/session_id, giới hạn history,
+    cho phép AI chỉ retrieve với category/top_k đã kiểm duyệt.
+    """
     try:
         req.question = validate_question(req.question)
         if req.category:
@@ -1269,9 +1273,13 @@ async def _chat_impl(req: ChatRequest, request: Request, user: Optional[Dict]):
         raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Validation error: {e}")
-
     if not req.question or not req.question.strip():
         raise HTTPException(status_code=400, detail="Cau hoi rong")
+
+
+async def _chat_impl(req: ChatRequest, request: Request, user: Optional[Dict]):
+    # Backend validation: AI chỉ đề xuất, backend kiểm tra lại (Least Privilege)
+    _validate_chat_request(req)
 
     # Kiem tra co data truoc khi goi LLM (tranh goi Ollama khi chua co data)
     # Nhưng với câu xã giao, recall lịch sử, toán học hoặc so sánh thì không cần data, cho phép trả lời ngay
@@ -1742,21 +1750,7 @@ async def chat_stream(req: ChatRequest, request: Request, user: Dict = Depends(r
     _guard_rbac(req, user)
     _guard_owner(req, user)
     # Validate như /api/chat
-    try:
-        req.question = validate_question(req.question)
-        if req.category:
-            req.category = validate_category(req.category)
-        if req.top_k is not None:
-            req.top_k = validate_top_k(req.top_k)
-        if req.session_id:
-            req.session_id = validate_session_id(req.session_id)
-        validate_tool_call("retrieve", {"category": req.category, "top_k": req.top_k})
-        if req.history and len(req.history) > 20:
-            raise HTTPException(status_code=400, detail="history quá dài")
-    except ValueError as ve:
-        raise HTTPException(status_code=400, detail=str(ve))
-    if not req.question or not req.question.strip():
-        raise HTTPException(status_code=400, detail="Cau hoi rong")
+    _validate_chat_request(req)
     # Tận dụng logic chat thường nhưng stream phần generate
     # Với câu toán/xã giao thì trả ngay không cần stream
     try:
@@ -1901,7 +1895,7 @@ async def chat_stream(req: ChatRequest, request: Request, user: Dict = Depends(r
                 ctx = await run_in_threadpool(lambda: _do_retrieve(standalone_q, category=req.category, top_k=fetch_k, session_id=sid))
                 ctx = _ensure_trang_phuc_coverage(standalone_q, ctx)
                 try:
-                    ctx = deduplicate_docs(ctx, threshold=0.92)
+                    ctx = deduplicate_docs(ctx)
                 except Exception:
                     pass
                 if not ctx:

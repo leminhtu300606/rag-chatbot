@@ -50,8 +50,6 @@ def _out_path(source: Path) -> Path:
 
 def _build_chunks_from_records(records: list[dict], filename: str, category: str, subcategory: str, source: str, session_id: str | None = None) -> list[dict]:
     """Tách chunk từ records đã load - dùng chung cho global và session upload."""
-    from backend.preprocessing.cleaner import clean_text as _clean
-    from backend.preprocessing.chunker import _effective_min_chars as _eff
 
     use_contextual = cfg.CHUNK.get("contextual", True)
     chunk_fn = contextual_chunk if use_contextual else semantic_chunk
@@ -59,7 +57,7 @@ def _build_chunks_from_records(records: list[dict], filename: str, category: str
     parent_text_by_page: dict[int, str] = {}
     for rec in records:
         if rec.get("block_type") == "text" or rec.get("kind") in ("pdf", "pdf_scan", "docx", "txt"):
-            pt = _clean(rec.get("text", ""))[: cfg.CHUNK.get("parent_chars", 600) if isinstance(cfg.CHUNK, dict) else 600]
+            pt = clean_text(rec.get("text", ""))[: cfg.CHUNK.get("parent_chars", 600) if isinstance(cfg.CHUNK, dict) else 600]
             if rec.get("page") not in parent_text_by_page and pt:
                 parent_text_by_page[rec["page"]] = pt
     global_parent = next(iter(parent_text_by_page.values())) if parent_text_by_page else ""
@@ -96,7 +94,7 @@ def _build_chunks_from_records(records: list[dict], filename: str, category: str
                         raw_text = f"[BẢNG trang {rec.get('page')}]\n{table_md}"
                 else:
                     raw_text = f"[BẢNG]\n{table_md}"
-            text = _clean(raw_text) if block_type != "table" else raw_text.strip()
+            text = clean_text(raw_text) if block_type != "table" else raw_text.strip()
             if not text:
                 continue
             max_c = cfg.CHUNK.get("table_max_chars", cfg.CHUNK.get("max_chars", 1200))
@@ -116,7 +114,7 @@ def _build_chunks_from_records(records: list[dict], filename: str, category: str
             else:
                 pieces = [text]
             for i, piece in enumerate(pieces):
-                _eff_min = _eff(None)
+                _eff_min = _effective_min_chars(None)
                 if len(piece.strip()) < cfg.CHUNK.get("table_min_chars", 30):
                     continue
                 chunk_id_base = f"{session_id}-{filename}" if session_id else filename
@@ -171,7 +169,7 @@ def _build_chunks_from_records(records: list[dict], filename: str, category: str
                 "session_id": session_id,
             })
             continue
-        text = _clean(rec.get("text", ""))
+        text = clean_text(rec.get("text", ""))
         if not text:
             continue
         meta_for_chunk = {
@@ -186,7 +184,7 @@ def _build_chunks_from_records(records: list[dict], filename: str, category: str
         else:
             pieces = chunk_fn(text, _embed_for_chunk)
         for i, piece in enumerate(pieces):
-            _eff_min = _eff(None)
+            _eff_min = _effective_min_chars(None)
             if len(piece.strip()) < _eff_min:
                 continue
             chunk_id_base = f"{session_id}-{filename}" if session_id else filename
@@ -223,9 +221,8 @@ def _build_chunks_from_records(records: list[dict], filename: str, category: str
     # Fallback cho upload: nếu file ngắn bị lọc hết thì giữ lại 1 chunk duy nhất
     if not out_chunks and session_id and records:
         try:
-            from backend.preprocessing.cleaner import clean_text as _ct2
             raw = "\n".join(r.get("text","") for r in records).strip()
-            cleaned = _ct2(raw) if raw else raw
+            cleaned = clean_text(raw) if raw else raw
             if cleaned and len(cleaned.strip()) >= 10:
                 # cắt 1200 nếu quá dài
                 txt = cleaned[:1200] if len(cleaned) > 1200 else cleaned

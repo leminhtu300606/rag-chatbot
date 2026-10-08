@@ -8,7 +8,7 @@ Luồng:  loader (PDF/DOCX + OCR) -> cleaner (làm sạch) -> chunker (semantic 
 Artifact: data/processed/<category>/<sub>/<file>.parquet  (mỗi dòng là 1 chunk + metadata, luu dang parquet)
 """
 
-from .loader import load_file, load_all, load_docx, load_pdf
+from .loader import load_file, load_docx, load_pdf
 from .cleaner import clean_text
 from .chunker import (
     semantic_chunk,
@@ -21,7 +21,6 @@ from .pipeline import process_file, process_all
 
 __all__ = [
     "load_file",
-    "load_all",
     "load_docx",
     "load_pdf",
     "clean_text",

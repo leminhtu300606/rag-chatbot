@@ -1,5 +1,3 @@
-"""Cau hinh + security dung chung.
-
-Canonical: ``backend.config.settings`` (truoc day ``backend.core`` file don).
+"""Cau hinh + security dung chung: ``backend.config.settings``.
 """
 from .settings import *  # noqa: F401,F403

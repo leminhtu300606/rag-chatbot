@@ -34,7 +34,7 @@ def retrieve_tool(query: str, category=None, top_k: int = 5, session_id: str | N
     ctx = _ensure_trang_phuc_coverage(query, ctx)
     try:
         from backend.common.utils import deduplicate_docs
-        ctx = deduplicate_docs(ctx, threshold=0.92)
+        ctx = deduplicate_docs(ctx)
     except Exception:
         pass
     return ctx or []
@@ -249,35 +249,10 @@ def run_agent(question: str, history=None, summary=None, style=None, category=No
     }
 
 
-def run_agent_stream(question: str, history=None, summary=None, style=None, category=None, top_k: int = 5, use_rerank: bool = True, session_id: str | None = None):
-    """Stream theo node (dung cho SSE sau nay). Yield (node_name, state_update)."""
-    import uuid
-    graph = get_graph()
-    init = {
-        "question": question,
-        "standalone_question": question,
-        "history": history,
-        "summary": summary,
-        "style": style,
-        "category": category,
-        "top_k": int(top_k or 5),
-        "use_rerank": bool(use_rerank),
-        "session_id": session_id,
-        "context": [],
-        "answer": "",
-        "sources": [],
-        "attempts": 0,
-        "needs_retry": False,
-        "retry_reason": "",
-    }
-    cfg_invoke = {"configurable": {"thread_id": session_id or f"agent-{uuid.uuid4().hex[:8]}"}}
-    yield from graph.stream(init, config=cfg_invoke, stream_mode="updates")
-
-
 __all__ = [
     "ChatState",
     "retrieve_tool", "rerank_tool", "generate_tool", "self_check_tool",
     "n_rewrite", "n_retrieve", "n_rerank", "n_generate", "n_selfcheck",
     "build_graph", "get_graph", "is_available", "is_enabled",
-    "run_agent", "run_agent_stream",
+    "run_agent",
 ]

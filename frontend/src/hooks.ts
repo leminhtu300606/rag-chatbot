@@ -59,13 +59,3 @@ export function useTypewriter(full: string, active: boolean): [string, boolean, 
   useEffect(() => clear, []);
   return [shown, done, skip];
 }
-
-/** Trạng thái "đang gõ..." cho composer. */
-export function useNow(): number {
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    const t = window.setInterval(() => setTick((x) => x + 1), 1000);
-    return () => window.clearInterval(t);
-  }, []);
-  return Date.now();
-}

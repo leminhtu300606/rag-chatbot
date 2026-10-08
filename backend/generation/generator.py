@@ -56,7 +56,6 @@ from .prompts import (
     SYSTEM_PROMPT,
     build_messages,
     build_messages_with_history,
-    build_prompt_text,
     build_rewrite_messages,
     build_summary_messages,
     build_social_messages,
@@ -1028,21 +1027,6 @@ def auto_answer_file(chunks: list[dict], file_text: str, extracted_query: str, s
         except Exception:
             raise e
 
-
-# ── Toán học (proxy sang calculator để giữ API thống nhất) ──
-def is_math_question(question: str, history: list[dict] | None = None, last_result=None) -> bool:
-    try:
-        from backend.generation.calculator import is_math_question as _is_math
-        return _is_math(question, history, last_result)
-    except Exception:
-        return False
-
-def is_math_request_steps(question: str, style: str | None = None) -> bool:
-    try:
-        from backend.generation.calculator import is_math_request_steps as _is_steps
-        return _is_steps(question, style)
-    except Exception:
-        return False
 
 def generate_social(question: str, history: list[dict] | None = None, summary: str | None = None, style: str | None = None) -> str:
     """Sinh câu trả lời xã giao - mặc định casual, không cần nguồn, vẫn nhớ từ đầu phiên."""

@@ -142,7 +142,7 @@ def build_messages(context: list[dict], question: str, style: str | None = None)
     if context:
         try:
             from backend.common.utils import deduplicate_docs
-            context = deduplicate_docs(context, threshold=0.92, exact_only=False)
+            context = deduplicate_docs(context)
         except Exception:
             pass
     if context:
@@ -215,7 +215,7 @@ def build_messages_with_history(
     if context:
         try:
             from backend.common.utils import deduplicate_docs
-            context = deduplicate_docs(context, threshold=0.92, exact_only=False)
+            context = deduplicate_docs(context)
         except Exception:
             pass
     if context:
@@ -335,12 +335,6 @@ def build_summary_messages(history: list[dict]) -> list[dict]:
     ]
 
 
-def build_prompt_text(context: list[dict], question: str, style: str | None = None) -> str:
-    """Dựng prompt dạng text đơn giản cho transformers pipeline (đơn lượt)."""
-    messages = build_messages(context, question, style=style)
-    return "\n\n".join(f"{m['role']}: {m['content']}" for m in messages)
-
-
 def build_prompt_text_with_history(
     context: list[dict], question: str, history: list[dict] | None = None, summary: str | None = None, style: str | None = None
 ) -> str:
@@ -399,7 +393,7 @@ def build_file_auto_answer_messages(chunks: list[dict], extracted_query: str, st
             from backend.common.utils import deduplicate_docs
             # chuyển chunks thành format retriever
             docs = [{"text": c.get("text",""), "metadata": c, "score": 1.0} for c in chunks]
-            docs = deduplicate_docs(docs, threshold=0.92)
+            docs = deduplicate_docs(docs)
             chunks = [d["metadata"] | {"text": d["text"]} for d in docs]  # giữ lại text
             # nhưng đơn giản lấy text từ docs
             parts = []

@@ -36,11 +36,6 @@ def normalize_text(text: str, strip_accents: bool = False) -> str:
     return t
 
 
-def hash_text(text: str, strip_accents: bool = False) -> str:
-    norm = normalize_text(text, strip_accents=strip_accents)
-    return hashlib.md5(norm.encode("utf-8")).hexdigest()
-
-
 def _jaccard(a: str, b: str, n: int = 3) -> float:
     """Jaccard trên shingle n-gram ký tự (nhanh)."""
     if not a or not b:
@@ -160,7 +155,7 @@ def deduplicate_docs(
     # Nếu có score, sắp xếp giảm dần trước để giữ bản tốt nhất
     has_score = any("score" in d for d in docs)
     if has_score:
-        # Với Chroma distance (nhỏ = gần), nhưng rerank score (lớn = tốt)
+        # Với vector distance (nhỏ = gần), nhưng rerank score (lớn = tốt)
         # Ta không biết chiều, nên giữ nguyên thứ tự nếu không rõ.
         # Chỉ sắp xếp nếu phát hiện rerank (score có thể âm hoặc dương lớn)
         # Thôi giữ nguyên để không đảo retrieval order

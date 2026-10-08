@@ -1,5 +1,3 @@
-"""Tien ich dung chung (dedup, chuan hoa...).
-
-Canonical: ``backend.common.utils`` (truoc day ``backend.utils`` file don).
+"""Tien ich dung chung (dedup, chuan hoa...): ``backend.common.utils``.
 """
 from .utils import *  # noqa: F401,F403

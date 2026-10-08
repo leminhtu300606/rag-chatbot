@@ -3,8 +3,7 @@ backend/indexing/embedder.py - Tạo embedding tiếng Việt
 ========================================================
 Nhiệm vụ:
 - Bao quanh SentenceTransformer để tạo embedding chuẩn hóa cho văn bản tiếng Việt.
-- Cung cấp hàm get_model_info(), get_dimension() để kiểm tra model, dim, device
-  phục vụ chẩn đoán và ghi metadata vào ChromaDB.
+- Cung cấp embed() batch-safe (L2-normalize) và warmup() để nạp model một lần.
 """
 import os
 import warnings
@@ -86,23 +85,4 @@ def warmup():
         embed(["khởi động"], batch_size=1)
     except Exception:
         pass
-
-
-def get_model_info() -> dict:
-    """Tra ve thong tin model embedding hien tai (de log khi luu vao ChromaDB)."""
-    try:
-        sample = embed(["test"], batch_size=1)
-        dim = len(sample[0]) if len(sample) else 0
-        return {"model": EMBED_MODEL, "device": _runtime_device or DEVICE, "dim": int(dim)}
-    except Exception as e:
-        return {"model": EMBED_MODEL, "device": DEVICE, "error": str(e)}
-
-
-def get_dimension() -> int:
-    """Lay dimension cua embedding (dung de kiem tra co khop voi ChromaDB khong)."""
-    try:
-        info = get_model_info()
-        return int(info.get("dim", 0))
-    except Exception:
-        return 0
 

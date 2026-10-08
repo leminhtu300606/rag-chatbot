@@ -250,7 +250,7 @@ def _manual_retrieve_generate(effective_question, standalone_q, category, top_k,
     context = _ensure_trang_phuc_coverage(query_for_retrieval, context)
     try:
         from backend.common.utils import deduplicate_docs
-        context = deduplicate_docs(context, threshold=0.92)
+        context = deduplicate_docs(context)
     except Exception:
         pass
     if not context:
@@ -494,7 +494,7 @@ def answer(
     # Fallback dedup nếu retriever chưa dedup
     try:
         from backend.common.utils import deduplicate_docs
-        context = deduplicate_docs(context, threshold=0.92)
+        context = deduplicate_docs(context)
     except Exception:
         pass
 

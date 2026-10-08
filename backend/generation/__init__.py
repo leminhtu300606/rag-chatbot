@@ -12,8 +12,8 @@ Thành phần:
 """
 
 from .generator import generate
-from .prompts import SYSTEM_PROMPT, build_messages, build_prompt_text
+from .prompts import SYSTEM_PROMPT, build_messages
 from .rag import answer
 from .reranker import rerank, RERANK_MODEL
 
-__all__ = ["generate", "SYSTEM_PROMPT", "build_messages", "build_prompt_text", "answer", "rerank", "RERANK_MODEL"]
+__all__ = ["generate", "SYSTEM_PROMPT", "build_messages", "answer", "rerank", "RERANK_MODEL"]

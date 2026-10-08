@@ -4,14 +4,12 @@ backend/generation/langchain_chain.py - Adapter LangChain (incremental)
 Muc tieu: boc Generation hien tai bang LangChain ma KHONG pha vo logic tieng Viet.
 
 Map:
-- dict chunk {"text", "metadata"} <-> Document(page_content, metadata)
 - build_messages/build_messages_with_history <-> ChatPromptTemplate
 - _call_ollama <-> ChatOllama
-- generate/generate_with_history <-> LCEL chain (prompt | llm | StrOutputParser)
-- _prepare_history/sessions.json <-> BufferWindow + Summary (giup san, van tuong thich API cu)
+- generate/generate_with_history/rewrite/summarize <-> LCEL chain (prompt | llm | StrOutputParser)
 
-Retrieval (hybrid BM25 + vector + rerank) GIU NGUYEN o backend/indexing,
-chi expose wrapper to_documents/from_retrieved de dung chung voi chain.
+Retrieval (hybrid BM25 + vector + rerank) GIU NGUYEN o backend/generation/rag,
+module nay chi boc khau sinh + viet lai + tom tat bang LangChain.
 
  Tat ca import LangChain la lazy + co fallback ve manual khi chua cai package.
 """
@@ -45,46 +43,6 @@ def is_enabled() -> bool:
     except Exception:
         flag = os.getenv("USE_LANGCHAIN", "1").strip().lower() not in ("0", "false", "no", "off")
     return flag and is_available()
-
-
-# ── Document adapters (giu metadata cu de filter category/session_id khong vo) ──
-
-def to_documents(chunks: list[dict]):
-    """chunks kieu retriever -> List[Document]. Lazy import de khong vo khi chua cai LC."""
-    from langchain_core.documents import Document
-    docs = []
-    for c in chunks or []:
-        text = c.get("text", "") if isinstance(c, dict) else str(c)
-        meta = dict(c.get("metadata", {})) if isinstance(c, dict) else {}
-        docs.append(Document(page_content=text, metadata=meta))
-    return docs
-
-
-def from_documents(docs) -> list[dict]:
-    """List[Document] -> chunks kieu cu {"text","metadata","score"}. """
-    out = []
-    for d in docs or []:
-        try:
-            text = getattr(d, "page_content", str(d))
-            meta = dict(getattr(d, "metadata", {}) or {})
-            score = float(meta.pop("_score", meta.get("score", 0.0)) or 0.0)
-        except Exception:
-            text, meta, score = str(d), {}, 0.0
-        out.append({"text": text, "metadata": meta, "score": score})
-    return out
-
-
-def get_vietnamese_splitter(chunk_size: int = 1200, chunk_overlap: int = 120):
-    """TextSplitter giu tuong thich chunk cu (heading Dieu/Khoan van do chunker cu lo).
-
-    Hien chi dung cho upload/doc moi khi muon chuan LC; pipeline parquet cu giu nguyen.
-    """
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-    return RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=["\n\nĐiều ", "\n\nKhoản ", "\n\n", "\n", ". ", " ", ""],
-    )
 
 
 # ── Prompt (tai su dung SYSTEM_PROMPT + STYLE hien tai) ──
@@ -269,48 +227,3 @@ def summarize_via_langchain(history: list[dict]) -> str | None:
         return str(out or "").strip()[:900] or None
     except Exception:
         return None
-
-
-# ── Retriever wrapper (optional): giu hybrid cu, expose dang LC Retriever ──
-
-class HybridWrapperRetriever:
-    """Wrap _do_retrieve hien tai thanh object co .invoke/.get_relevant_documents de ghep LCEL.
-
-    Khong thay doi thuat toan (van hybrid BM25 tieng Viet + dedup + session filter).
-    """
-
-    def __init__(self, category=None, top_k: int = 5, session_id: str | None = None):
-        self.category = category
-        self.top_k = top_k
-        self.session_id = session_id
-
-    def invoke(self, query: str) -> list:
-        from backend.generation.rag import _do_retrieve
-        ctx = _do_retrieve(query, category=self.category, top_k=self.top_k, session_id=self.session_id)
-        return to_documents(ctx)
-
-    def get_relevant_documents(self, query: str) -> list:
-        return self.invoke(query)
-
-
-def build_rag_chain(category=None, top_k: int = 5, style: str | None = None, session_id: str | None = None):
-    """LCEL end-to-end: retriever(wrapper) -> format -> prompt -> llm. Dung khi muon 1 chain duy nhat."""
-    from langchain_core.output_parsers import StrOutputParser
-    from langchain_core.runnables import RunnableLambda
-    prompt = build_lc_prompt(style=style, with_history=False)
-    llm = get_chat_model(temperature=_style_temperature(style), num_predict=_token_limit(False))
-    retriever = HybridWrapperRetriever(category=category, top_k=top_k, session_id=session_id)
-
-    def _format_docs(docs) -> str:
-        return _format_context_block(from_documents(docs))
-
-    chain = (
-        {"docs": RunnableLambda(lambda q: retriever.invoke(q)), "question": lambda q: q}
-        | RunnableLambda(lambda d: {
-            "system": getattr(prompt, "_rag_system_text", ""),
-            "context_block": f"Ngữ cảnh:\n{_format_docs(d['docs'])}\n\nCâu hỏi:\n{d['question']}",
-            "question": "",
-        })
-        | prompt | llm | StrOutputParser()
-    )
-    return chain
