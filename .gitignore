@@ -27,6 +27,7 @@ Thumbs.db
 chroma_db/
 checkpoints/
 data/uploads/
+data/processed/
 data/processed_uploads/
 data/processed/.versions/
 
