@@ -1,17 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api, getToken, setToken } from "./api/client";
+import { api } from "./api/client";
 import { ApiError } from "./api/client";
 import {
   ChatMessage,
   Composer,
-  LoginModal,
-  Sidebar,
-  SourcesPanel,
-  StatsModal,
+  SideHistory,
   UploadsBar,
   Welcome,
+  WidgetHeader,
 } from "./components";
-import { isNetworkError, offlineGreeting, offlineMath, parseCategory, shortId } from "./utils";
+import { isNetworkError, offlineGreeting, offlineMath, parseCategory } from "./utils";
 import type {
   AssistantMeta,
   ChatSource,
@@ -19,7 +17,6 @@ import type {
   LocalSession,
   Msg,
   SessionMap,
-  StatsResponse,
   UploadFileInfo,
 } from "./types";
 import type { StreamDone } from "./api/client";
@@ -105,10 +102,11 @@ function pushSessionParam(id: string | null) {
 export default function App() {
   const [sessions, setSessions] = useState<SessionMap>(() => loadMap());
   const [activeId, setActiveId] = useState<string | null>(() => {
+    // Luôn mở phiên mới khi tải lại app; chỉ theo ?c= khi được share link tường minh.
     try {
-      return localStorage.getItem(LS_ACTIVE) || querySessionParam();
-    } catch {
       return querySessionParam();
+    } catch {
+      return null;
     }
   });
   const [style] = useState<string>(() => {
@@ -119,22 +117,21 @@ export default function App() {
     }
   });
   const [display, setDisplay] = useState<DisplayMsg[]>([]);
-  const [panelMeta, setPanelMeta] = useState<AssistantMeta | null>(null);
   const [typingKey, setTypingKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [healthText, setHealthText] = useState("Đang kiểm tra hệ thống");
   const [healthOk, setHealthOk] = useState<boolean | null>(null);
-  const [llmInfo, setLlmInfo] = useState("Đang kết nối mô hình");
-  const [accountName, setAccountName] = useState("Học viên KTMM");
-  const [authed, setAuthed] = useState(() => !!getToken());
-  const [statsData, setStatsData] = useState<StatsResponse | null>(null);
-  const [loginOpen, setLoginOpen] = useState(false);
   const [uploads, setUploads] = useState<UploadFileInfo[]>([]);
   const [totalChunks, setTotalChunks] = useState(0);
-  const [rightOpen, setRightOpen] = useState(false);
-  const [sideOpen, setSideOpen] = useState(false);
+  const [sideOpen, setSideOpen] = useState(() => {
+    try {
+      return window.innerWidth > 760;
+    } catch {
+      return true;
+    }
+  });
 
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
@@ -143,12 +140,18 @@ export default function App() {
   const msgBoxRef = useRef<HTMLDivElement>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
 
-  const active = activeId ? sessions[activeId] : undefined;
-  const turns = useMemo(() => Math.floor(display.length / 2), [display]);
-  const sessionInfo = useMemo(
-    () => (activeId ? `${shortId(activeId)} • ${turns} lượt` : ""),
-    [activeId, turns]
-  );
+  const dateStr = useMemo(() => {
+    try {
+      return new Date().toLocaleDateString("vi-VN", {
+        weekday: "long",
+        day: "numeric",
+        month: "long",
+        year: "numeric",
+      });
+    } catch {
+      return "";
+    }
+  }, []);
 
   /* ---------- persist + active ---------- */
   useEffect(() => persistMap(sessions), [sessions]);
@@ -167,33 +170,20 @@ export default function App() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [display, typingKey]);
 
-  /* ---------- health + stats ---------- */
+  /* ---------- health ---------- */
   const loadHealth = useCallback(async () => {
     try {
-      const [h, s] = await Promise.allSettled([api.health(), api.stats()]);
-      if (h.status === "fulfilled") {
-        const j = h.value;
-        if (j.status === "ready") {
-          const n = j.vector_count ?? j.chroma_count ?? 0;
-          setHealthText(`${n} vectors • ${j.processed_files ?? 0} files`);
-          setHealthOk(true);
-        } else if (j.status === "not_ready") {
-          setHealthText("Chưa có dữ liệu");
-          setHealthOk(false);
-        } else {
-          setHealthText(j.error ? `Lỗi: ${String(j.error).slice(0, 80)}` : "Không rõ trạng thái");
-          setHealthOk(false);
-        }
-      } else {
-        setHealthText("Mất kết nối máy chủ");
+      const j = await api.health();
+      if (j.status === "ready") {
+        const n = j.vector_count ?? j.chroma_count ?? 0;
+        setHealthText(`${n} vectors • ${j.processed_files ?? 0} files`);
+        setHealthOk(true);
+      } else if (j.status === "not_ready") {
+        setHealthText("Chưa có dữ liệu");
         setHealthOk(false);
-      }
-      if (s.status === "fulfilled") {
-        const st = s.value;
-        const model = String(st.llm_model || "?");
-        const backend = String(st.llm_backend || "?");
-        const device = String(st.device || st.embed_model || "?");
-        setLlmInfo(`${model} • ${backend} (${device})`);
+      } else {
+        setHealthText(j.error ? `Lỗi: ${String(j.error).slice(0, 80)}` : "Không rõ trạng thái");
+        setHealthOk(false);
       }
     } catch {
       setHealthText("Mất kết nối máy chủ");
@@ -263,7 +253,6 @@ export default function App() {
         const conv = local?.conversation || [];
         setDisplay(conv.map((m) => ({ ...m, key: mkey() })));
       }
-      setPanelMeta(null);
       setTypingKey(null);
     },
     [style]
@@ -287,30 +276,19 @@ export default function App() {
     }
   }, []);
 
-  /* ---------- boot ---------- */
+  /* ---------- boot: luôn vào phiên trò chuyện mới (trừ khi có ?c= share link) ---------- */
   useEffect(() => {
     const q = querySessionParam();
-    const startId = activeRef.current || q;
-    if (startId && sessionsRef.current[startId]) {
-      setActiveId(startId);
-      loadSessionView(startId);
-      loadUploads(startId);
-    } else if (startId) {
-      // id lạ (?c=): tạo vỏ rồi kéo server
-      setActiveId(startId);
-      loadSessionView(startId);
-      loadUploads(startId);
+    if (q) {
+      // id tường minh (?c=): mở đúng phiên được share
+      setActiveId(q);
+      loadSessionView(q);
+      loadUploads(q);
     } else {
-      setDisplay([]);
+      newChat();
     }
     loadHealth();
     mergeServerSessions();
-    api
-      .me()
-      .then((j) => {
-        if (j.username && j.username !== "anonymous") setAccountName(j.username);
-      })
-      .catch(() => undefined);
     const onPop = () => {
       const id = querySessionParam();
       if (id && id !== activeRef.current) {
@@ -320,8 +298,6 @@ export default function App() {
       }
     };
     window.addEventListener("popstate", onPop);
-    const onAuth = () => setLoginOpen(true);
-    window.addEventListener("rag:unauthorized", onAuth);
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
@@ -331,7 +307,6 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => {
       window.removeEventListener("popstate", onPop);
-      window.removeEventListener("rag:unauthorized", onAuth);
       window.removeEventListener("keydown", onKey);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -356,14 +331,15 @@ export default function App() {
     return () => window.clearInterval(t);
   }, [activeId, loadUploads]);
 
-  /* ---------- new/select/delete ---------- */
+  /* ---------- new chat (nút refresh trên widget) ---------- */
   const newChat = useCallback(() => {
     try {
       streamAbortRef.current?.abort();
     } catch {
       /* bỏ qua */
     }
-    streamAbortRef.current = null;    const id = uid();
+    streamAbortRef.current = null;
+    const id = uid();
     const now = Date.now();
     const sess: LocalSession = {
       title: "Cuộc trò chuyện mới",
@@ -375,57 +351,12 @@ export default function App() {
     setSessions((prev) => ({ ...prev, [id]: sess }));
     setActiveId(id);
     setDisplay([]);
-    setPanelMeta(null);
     setTypingKey(null);
     setUploads([]);
     setTotalChunks(0);
-    setSideOpen(false);
     pushSessionParam(id);
     api.createSession(id, sess.title, style);
   }, [style]);
-
-  const selectSession = useCallback(
-    (id: string) => {
-      if (id === activeRef.current) return;
-      try {
-        streamAbortRef.current?.abort();
-      } catch {
-        /* bỏ qua */
-      }
-      streamAbortRef.current = null;
-      setActiveId(id);
-      pushSessionParam(id);
-      loadSessionView(id);
-      loadUploads(id);
-      setSideOpen(false);
-    },
-    [loadSessionView, loadUploads]
-  );
-
-  const deleteSession = useCallback(
-    async (id: string) => {
-      if (!window.confirm("Xóa cuộc trò chuyện này?")) return;
-      try {
-        streamAbortRef.current?.abort();
-      } catch {
-        /* bỏ qua */
-      }
-      streamAbortRef.current = null;
-      api.deleteSession(id).catch(() => undefined);
-      setSessions((prev) => {
-        const next = { ...prev };
-        delete next[id];
-        return next;
-      });
-      if (id === activeRef.current) {
-        setActiveId(null);
-        setDisplay([]);
-        setPanelMeta(null);
-        pushSessionParam(null);
-      }
-    },
-    []
-  );
 
   /* ---------- send ---------- */
   const pushAssistant = useCallback(
@@ -446,7 +377,6 @@ export default function App() {
           },
         };
       });
-      if (meta) setPanelMeta(meta);
     },
     []
   );
@@ -520,10 +450,9 @@ export default function App() {
               ...s,
               updatedAt: Date.now(),
               conversation: [...s.conversation, { role: "assistant" as const, content: text }].slice(-MAX_KEEP),
-            },
-          };
-        });
-        if (meta) setPanelMeta(meta);
+          },
+        };
+      });
       };
       const dropPlaceholder = () => {
         setDisplay((prev) => prev.filter((m) => m.key !== akey));
@@ -568,8 +497,8 @@ export default function App() {
         if (ctrl.signal.aborted) return; // chuyển/xóa phiên giữa chừng: view mới đã reset
         if (e instanceof ApiError && e.status === 401) {
           dropPlaceholder();
-          setDisplay((prev) => prev.slice(0, -1)); // gỡ user msg như hành vi cũ
-          return; // login modal đã mở qua event
+          pushAssistant(sid, "🔒 Phiên này yêu cầu đăng nhập. Hãy liên hệ quản trị để được cấp tài khoản.", { badge: "🔒", sources: [] });
+          return;
         }
         if (!streamed) {
           // Stream hỏng ngay từ đầu (chưa có chữ nào): fallback /api/chat blocking 1 lần
@@ -583,7 +512,7 @@ export default function App() {
           } catch (e2) {
             if (e2 instanceof ApiError && e2.status === 401) {
               dropPlaceholder();
-              setDisplay((prev) => prev.slice(0, -1));
+              pushAssistant(sid, "🔒 Phiên này yêu cầu đăng nhập. Hãy liên hệ quản trị để được cấp tài khoản.", { badge: "🔒", sources: [] });
               return;
             }
             e = e2;
@@ -705,142 +634,97 @@ export default function App() {
     loadUploads(sid);
   }, [uploads, loadUploads]);
 
-  /* ---------- auth ---------- */
-  const doLogin = useCallback(async (u: string, p: string): Promise<string | null> => {
-    try {
-      const j = await api.login(u, p);
-      setToken(j.token);
+  /* ---------- chọn/xóa phiên từ sidebar ---------- */
+  const selectSession = useCallback(
+    (id: string) => {
+      if (id === activeRef.current) return;
       try {
-        localStorage.removeItem(LS_SESSIONS);
-        localStorage.removeItem(LS_ACTIVE);
+        streamAbortRef.current?.abort();
       } catch {
         /* bỏ qua */
       }
-      window.location.reload();
-      return null;
-    } catch (e) {
-      return e instanceof ApiError ? e.detail : "Đăng nhập thất bại";
-    }
-  }, []);
+      streamAbortRef.current = null;
+      setActiveId(id);
+      pushSessionParam(id);
+      loadSessionView(id);
+      loadUploads(id);
+    },
+    [loadSessionView, loadUploads]
+  );
 
-  const loginClick = useCallback(() => {
-    if (getToken()) {
-      api.logout().catch(() => undefined);
-      setToken(null);
+  const deleteSession = useCallback(
+    async (id: string) => {
       try {
-        localStorage.removeItem(LS_SESSIONS);
-        localStorage.removeItem(LS_ACTIVE);
+        streamAbortRef.current?.abort();
       } catch {
         /* bỏ qua */
       }
-      window.location.reload();
-    } else {
-      setLoginOpen(true);
-    }
-  }, []);
-
-  const openStats = useCallback(async () => {
-    try {
-      const s = await api.stats();
-      setStatsData(s);
-    } catch (e) {
-      setStatsData({ error: e instanceof ApiError ? e.detail : String(e) } as StatsResponse);
-    }
-  }, []);
+      streamAbortRef.current = null;
+      api.deleteSession(id).catch(() => undefined);
+      setSessions((prev) => {
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      if (id === activeRef.current) {
+        newChat();
+      }
+    },
+    [newChat]
+  );
 
   const showWelcome = display.length === 0;
+  const showTyping =
+    loading && display.length > 0 && display[display.length - 1].role === "user";
 
   return (
-    <div className="app-shell">
-      <aside className={`sidebar${sideOpen ? " open" : ""}`}>
-        <Sidebar
-          sessions={sessions}
-          activeId={activeId}
-          turns={turns}
+    <div className="layout">
+      <SideHistory
+        open={sideOpen}
+        sessions={sessions}
+        activeId={activeId}
+        onNew={newChat}
+        onSelect={selectSession}
+        onDelete={deleteSession}
+      />
+      {sideOpen && window.innerWidth <= 760 && (
+        <div className="drawer-backdrop" onClick={() => setSideOpen(false)}></div>
+      )}
+      <div className="main">
+        <WidgetHeader
+          online={healthOk}
           healthText={healthText}
-          healthOk={healthOk}
-          llmInfo={llmInfo}
-          accountName={accountName}
-          authed={authed}
-          sessionInfo={sessionInfo}
-          onNewChat={newChat}
-          onSelect={selectSession}
-          onDelete={deleteSession}
-          onLoginClick={loginClick}
-          onStatsClick={openStats}
+          onToggleSidebar={() => setSideOpen((v) => !v)}
         />
-      </aside>
-      <main className="main-panel">
-        <header className="topbar">
-          <div className="topbar-left">
-            <button className="icon-btn mobile" title="Mở thanh bên" onClick={() => setSideOpen(true)}>
-              <i className="fa-solid fa-bars"></i>
-            </button>
-            <div className="workspace-title">
-              <span className="eyebrow">Không gian hỏi đáp</span>
-              <strong>Trợ lý học viện</strong>
+        <div ref={msgBoxRef} className="widget-body">
+          <div className="date-divider">
+            <span>{dateStr}</span>
+          </div>
+          {showWelcome && <Welcome onAsk={send} />}
+          {!showWelcome &&
+            display.map((m) => (
+              <ChatMessage key={m.key} msg={m} typing={m.key === typingKey} />
+            ))}
+          {showTyping && (
+            <div className="msg-row assistant">
+              <div className="bubble typing-dots">
+                <span></span>
+                <span></span>
+                <span></span>
+              </div>
             </div>
-          </div>
-          <div className="topbar-actions">
-            <span className="secure-label">
-              <i className="fa-solid fa-shield-halved"></i> Dữ liệu nội bộ
-            </span>
-            <a className="icon-btn" href="/docs" target="_blank" title="API Docs">
-              <i className="fa-solid fa-code"></i>
-            </a>
-            <a className="icon-btn" href="/api/health" target="_blank" title="Trạng thái hệ thống">
-              <i className="fa-solid fa-heart-pulse"></i>
-            </a>
-            <button
-              className="icon-btn"
-              title="Nguồn tham khảo"
-              onClick={() => setRightOpen((v) => !v)}
-            >
-              <i className="fa-solid fa-book-open"></i>
-            </button>
-          </div>
-        </header>
-        <section className="chat-stage">
-          <div ref={msgBoxRef} className="messages">
-            {showWelcome && <Welcome onAsk={send} />}
-            {!showWelcome &&
-              display.map((m) => (
-                <ChatMessage key={m.key} msg={m} typing={m.key === typingKey} />
-              ))}
-            {loading && <div className="hint">Đang suy nghĩ...</div>}
-          </div>
-          {uploads.length > 0 && (
-            <UploadsBar
-              files={uploads}
-              totalChunks={totalChunks}
-              onDelete={deleteUpload}
-              onClearAll={clearUploads}
-            />
           )}
-          <Composer loading={loading} busy={busy} status={status} onSend={send} onAttach={attach} />
-        </section>
-      </main>
-      <aside className={`sources-panel${rightOpen ? " open" : ""}`}>
-        <div className="panel-header">
-          <div>
-            <span className="eyebrow">Tài liệu tham chiếu</span>
-            <h2>
-              <i className="fa-solid fa-link"></i> Nguồn trả lời
-            </h2>
-          </div>
-          <button className="icon-btn" title="Đóng nguồn" onClick={() => setRightOpen(false)}>
-            <i className="fa-solid fa-xmark"></i>
-          </button>
         </div>
-        <SourcesPanel meta={panelMeta} />
-      </aside>
-      <div
-        className={`sources-backdrop${rightOpen ? "" : " hidden"}`}
-        onClick={() => setRightOpen(false)}
-      ></div>
-      {sideOpen && <div className="sources-backdrop" onClick={() => setSideOpen(false)}></div>}
-      <StatsModal stats={statsData} onClose={() => setStatsData(null)} />
-      <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} onLogin={doLogin} />
+        {uploads.length > 0 && (
+          <UploadsBar
+            files={uploads}
+            totalChunks={totalChunks}
+            onDelete={deleteUpload}
+            onClearAll={clearUploads}
+          />
+        )}
+        <Composer loading={loading} busy={busy} status={status} onSend={send} onAttach={attach} />
+      </div>
     </div>
   );
 }

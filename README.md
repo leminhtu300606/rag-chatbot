@@ -88,6 +88,8 @@ E:\rag\
 │   ├── package.json / vite.config.ts / tsconfig.json
 │   └── src/ (App.tsx, components.tsx, api/client.ts, types.ts, hooks.ts, utils.ts, styles.css)
 ├── requirements.txt
+├── start-server.bat              # Khởi động sạch: dọn port 8000 rồi chạy uvicorn
+├── stop-server.bat               # Tắt server đang nghe port 8000
 └── README.md
 ```
 
@@ -97,7 +99,8 @@ E:\rag\
 | Chỉ clean | `python -m backend.cli clean` |
 | Chỉ index | `python -m backend.cli index --rebuild` |
 | Kiểm tra | `python -m backend.cli clean --stats` (xem /api/health để biết số files/vectors) |
-| Chạy API | `uvicorn backend.api:app --reload --port 8000` |
+| Chạy API | `start-server.bat` (khởi động sạch) hoặc `uvicorn backend.api:app --host 127.0.0.1 --port 8000` |
+| Tắt server | `stop-server.bat` |
 
 | Phần | Nhiệm vụ | Input → Output | Thư mục |
 |------|----------|----------------|---------|
@@ -113,14 +116,15 @@ E:\rag\
 
 *   **Tiền xử lý:** Hỗ trợ PDF (bản quét OCR) và DOCX, làm sạch header/footer, chunking ngữ nghĩa + ngữ cảnh (giữ tiêu đề Chương/Điều, overlap câu).
 *   **Indexing:** Embedding `dangvantuan/vietnamese-embedding`, pgvector cosine (HNSW, distance 0~2 như cũ), build incremental theo `mtime` + manifest.
-*   **Rerank:** Cross-encoder `ms-marco-MiniLM-L-6-v2`, mặc định `top_k=3`.
+*   **Rerank:** Cross-encoder `ms-marco-MiniLM-L-6-v2`, mặc định `top_k=4` (xem `DEFAULT_RERANK_TOP_K`).
 *   **Hội thoại có ngữ cảnh:**
     *   Viết lại câu hỏi mơ hồ thành dạng độc lập (heuristic + LLM) để retrieval chính xác.
-    *   Quản lý cửa sổ lịch sử `CONVERSATION_WINDOW=6` turns, cắt mỗi message `300` ký tự.
-    *   Tự động tóm tắt khi vượt `CONVERSATION_SUMMARY_THRESHOLD=12` turns.
+    *   Quản lý cửa sổ lịch sử `CONVERSATION_WINDOW=8` turns, cắt mỗi message `600` ký tự.
+    *   Tự động tóm tắt khi vượt `CONVERSATION_SUMMARY_THRESHOLD=10` turns.
     *   Lưu phiên in-memory trên server (`session_id`) + `localStorage` trên client, có endpoint `GET/DELETE /api/sessions/{id}`.
-*   **Giao diện:** Bỏ phần cấu hình RAG trên UI (dùng mặc định `top_k=3`, `rerank=true`, luôn nhớ hội thoại), chỉ hiển thị trạng thái health/history/session, hỗ trợ gõ `quy_che: câu hỏi` để lọc danh mục, hiệu ứng typewriter, panel nguồn/rewrite/summary.
-*   **CLI:** `backend/answer.py` hỗ trợ hội thoại tương tác (`clear`/`history`), `backend/test.py` kiểm tra chunking/embedding.
+*   **Trả lời streaming (mặc định):** `POST /api/chat/stream` (SSE) hiện chữ dần + trạng thái từng bước (`Đang tìm tài liệu…` → `Đang sinh câu trả lời…`), single-pass không agent-retry để thời gian bounded; `/api/chat` blocking giữ làm fallback tự động.
+*   **Giao diện (ChatGPT-style):** sidebar lịch sử nhóm theo ngày (Hôm nay / Hôm qua / 7 ngày qua / Cũ hơn) + nút Đoạn chat mới, bubbles tím/xám, quick-reply gợi ý, emoji, đính kèm file (PDF/DOCX/TXT/MD), nguồn tham khảo mở rộng inline ngay dưới câu trả lời, hiệu ứng typewriter cho đường fallback. Mở app luôn vào phiên mới (chỉ `?c=<id>` mới mở đúng phiên share). Không còn form đăng nhập trên UI (401 báo thẳng trong bubble).
+*   **CLI:** `python -m backend.cli clean|index` để nạp dữ liệu; `clean --stats` xem thống kê chunk.
 
 ---
 
@@ -179,7 +183,7 @@ python -m backend.cli index --rebuild       # build lại toàn bộ
 curl -X POST http://localhost:8000/api/chat -H "Content-Type: application/json" -d '{"question":"Quy chế đào tạo là gì?","use_rerank":true,"show_context":true}'
 ```
 
-**Hội thoại nhiều lượt:** dùng giao diện web (`http://localhost:8000/`, mỗi phiên có `session_id` riêng, hỗ trợ `New chat`) hoặc truyền `history` + `session_id` qua `POST /api/chat`.
+**Hội thoại nhiều lượt:** dùng giao diện web (`http://127.0.0.1:8000/`, luôn mở phiên mới, sidebar có nút Đoạn chat mới + lịch sử nhóm ngày) hoặc truyền `history` + `session_id` qua `POST /api/chat`.
 
 Trong Python:
 ```python
@@ -205,16 +209,21 @@ print(res["answer"])
 python -m backend.cli clean
 python -m backend.cli index --rebuild
 
-# 2. Chạy API (phục vụ cả frontend)
-uvicorn backend.api:app --reload --port 8000
+# 2. Chạy API (phục vụ cả frontend) — cách khuyến nghị:
+.\start-server.bat
+# (tự tắt process cũ kẹt port 8000 rồi chạy uvicorn foreground; Ctrl+C để dừng)
+# Thủ công:
+uvicorn backend.api:app --host 127.0.0.1 --port 8000
 # hoặc
 python -m backend.api
 
 # 3. Mở trình duyệt
-# Frontend:   http://localhost:8000/
-# API Docs:   http://localhost:8000/docs
-# Health:     http://localhost:8000/api/health
+# Frontend:   http://127.0.0.1:8000/  (luôn mở phiên chat mới)
+# API Docs:   http://127.0.0.1:8000/docs
+# Health:     http://127.0.0.1:8000/api/health
 ```
+
+> **1 port = 1 server.** Nếu báo `10048` (port bận) thì chạy `.\stop-server.bat` trước, hoặc dùng luôn server đang chạy.
 
 ---
 
@@ -224,13 +233,14 @@ python -m backend.api
 |--------|----------|-------|
 | GET | `/` | Frontend |
 | GET | `/docs` | Swagger UI |
-| GET | `/api/health` | Kiểm tra `chroma_count` + `processed_files` |
+| GET | `/api/health` | Kiểm tra `vector_count` + `processed_files` |
 | GET | `/api/stats` | Thống kê chi tiết + `active_sessions` |
 | GET | `/api/categories` | Danh sách category |
 | GET | `/api/sessions` | Danh sách phiên |
 | GET | `/api/sessions/{id}` | Chi tiết phiên (history, summary) |
 | DELETE | `/api/sessions/{id}` | Xóa phiên |
-| POST | `/api/chat` | Hỏi đáp hội thoại |
+| POST | `/api/chat` | Hỏi đáp hội thoại (blocking, fallback) |
+| POST | `/api/chat/stream` | Hỏi đáp streaming SSE (mặc định trên UI) |
 | POST | `/api/clean` | Trả về stats (không chạy clean) |
 
 **POST /api/chat:**
@@ -278,12 +288,12 @@ curl -X POST http://localhost:8000/api/chat \
 
 ## 8. Frontend (React + TypeScript + Vite)
 
-`frontend/` là project Vite. Dev: `cd frontend && npm install && npm run dev` (proxy `/api` → `http://127.0.0.1:8000`, mở `http://localhost:5173`). Prod: `npm run build` → `frontend/dist/`, được `backend/api/app.py` serve tại `/` (ưu tiên `dist`, fallback thư mục `frontend/`).
+`frontend/` là project Vite. Dev: `cd frontend && npm install && npm run dev` (proxy `/api` → `http://127.0.0.1:8000`, mở `http://localhost:5173`, vẫn cần backend chạy song song). Prod: `npm run build` → `frontend/dist/`, được `backend/api/app.py` serve tại `/` (ưu tiên `dist`, fallback thư mục `frontend/`).
 
-*   `src/App.tsx` — Điều phối state: sessions, hội thoại, upload, auth, health polling.
-*   `src/components.tsx` — Layout 3 cột (sidebar lịch sử + chat chính + panel nguồn right drawer), welcome + examples, typewriter, uploads bar, login/stats modal.
-*   `src/api/client.ts` — Typed client cho mọi endpoint (`/api/chat`, sessions, uploads, auth...), tự gắn Bearer `rag_token`, 401 mở form login.
-*   Dùng mặc định `top_k=3`, `rerank=true`, luôn nhớ hội thoại. Hỗ trợ gõ `quy_che: câu hỏi` để lọc danh mục ngay trong ô chat. Giữ nguyên keys `localStorage` cũ (`rag_sessions_v2`, `rag_active_session_v2`, `rag_token`) nên tương thích phiên/chat cũ.
+*   `src/App.tsx` — Luồng chat: sidebar lịch sử, streaming SSE + fallback blocking, upload theo phiên, polling health. Mở app luôn tạo phiên mới (trừ `?c=<id>`).
+*   `src/components.tsx` — Sidebar lịch sử nhóm ngày, header bot + online, bubbles, quick-reply pills, composer (ô nhập + gửi + emoji + đính kèm), nguồn inline, uploads bar. Không còn sidebar 3 cột / panel nguồn rời / modal login-thống kê cũ.
+*   `src/api/client.ts` — Typed client cho mọi endpoint (`/api/chat`, `/api/chat/stream` SSE, sessions, uploads, auth...), tự gắn Bearer `rag_token`.
+*   Dùng mặc định `use_rerank=true`, luôn nhớ hội thoại. Hỗ trợ gõ `quy_che: câu hỏi` để lọc danh mục ngay trong ô chat. Keys `localStorage`: `rag_sessions_v2`, `rag_active_session_v2`, `rag_token`.
 
 ---
 
@@ -298,9 +308,9 @@ PROCESSED_EXT = ".parquet"
 
 EMBED_MODEL = "dangvantuan/vietnamese-embedding"
 LLM_BACKEND = "ollama"          # ollama | transformers
-LLM_MODEL = "qwen2.5"           # qwen2.5:0.5b/1.5b/3b/7b/14b/32b
+LLM_MODEL = "qwen2.5:1.5b"      # qwen2.5:0.5b/1.5b/3b/7b/14b/32b
 OLLAMA_BASE = "http://localhost:11434"
-GEN_MAX_TOKENS = 512
+GEN_MAX_TOKENS = 1024
 
 CHUNK = {
     "min_chars": 200, "max_chars": 1200,
@@ -308,17 +318,16 @@ CHUNK = {
     "contextual": True, "context_mode": "heading+overlap",
     "context_window": 1, "heading_enrich": True, "use_llm_context": False
 }
-RETRIEVE_TOP_K = 3
-COLLECTION_NAME = "rag_hvm"
+RETRIEVE_TOP_K = 5
 
 # Hội thoại
-CONVERSATION_WINDOW = 6                  # giữ 6 turns gần nhất
-CONVERSATION_SUMMARY_THRESHOLD = 12      # vượt 12 turns thì tóm tắt
-CONVERSATION_MAX_HISTORY_CHARS = 300
+CONVERSATION_WINDOW = 8                  # giữ 8 turns gần nhất
+CONVERSATION_SUMMARY_THRESHOLD = 10      # vượt 10 turns thì tóm tắt
+CONVERSATION_MAX_HISTORY_CHARS = 600
 REWRITE_MODEL = None                     # None = dùng LLM_MODEL
 SUMMARY_MODEL = None
 REWRITE_MAX_TOKENS = 256
-SUMMARY_MAX_TOKENS = 256
+SUMMARY_MAX_TOKENS = 320
 ```
 
 ---
@@ -328,7 +337,7 @@ SUMMARY_MAX_TOKENS = 256
 *   **Parquet:** `storage.py` đọc được cả `parquet` và `jsonl` cũ để migrate: `python -m backend.preprocessing.storage --migrate` (cần `pandas` + `pyarrow` đã có trong `requirements.txt`).
 *   **Ollama lỗi:** Nếu gặp `out-of-memory` → đổi `LLM_MODEL` sang `qwen2.5:1.5b`/`0.5b`; nếu `connection refused` → kiểm tra `ollama serve` và `ollama list`.
 *   **Dimension mismatch:** Chạy `python -m backend.cli index --rebuild` sau khi đổi `EMBED_MODEL`.
-*   **Session:** In-memory, TTL 24h, tối đa 200 phiên, mỗi phiên tối đa 100 messages; xóa bằng `DELETE /api/sessions/{id}` hoặc nút `New chat` (xóa cả server + localStorage).
+*   **Session:** In-memory, TTL 24h, tối đa 200 phiên, mỗi phiên tối đa 100 messages; xóa bằng `DELETE /api/sessions/{id}`, nút 🗑 trong sidebar, hoặc tạo phiên mới (mở app luôn vào phiên mới).
 
 ---
 
