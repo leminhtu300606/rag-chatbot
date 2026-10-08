@@ -5,24 +5,30 @@ Bien cac chunk da tien xu ly thanh vector va luu vao Vector Store, ho tro truy x
 
 Cau truc:
 - embedder.py      : tao embedding tieng Viet (dangvantuan/vietnamese-embedding)
-- vectorstore.py   : luu/truy van ChromaDB + helpers peek/get_stats
+- vectorstore.py   : luu/truy van PostgreSQL/pgvector + helpers peek/get_stats
 - retrieval.py     : cum truy xuat top-k (vector + BM25 + hybrid trong 1 file)
-- (logic build)    : da chuyen ra backend/index.py (truoc la build_index.py) - embed + upsert parquet -> Chroma (incremental + --rebuild)
+- (logic build)    : nam o backend/cli/main.py build() - embed + upsert parquet -> pgvector (incremental + --rebuild)
 
 Reranker da chuyen han sang backend/generation/reranker.py (generation lo cham diem cho prompt).
 """
 
 from .embedder import embed
-from .vectorstore import get_client, get_collection, add_chunks, count, reset_collection, peek, get_stats
+from .vectorstore import (
+    get_client,
+    query_vector,
+    add_chunks,
+    count,
+    reset_collection,
+    get_stats,
+)
 
 __all__ = [
     "embed",
     "get_client",
-    "get_collection",
+    "query_vector",
     "add_chunks",
     "count",
     "reset_collection",
-    "peek",
     "get_stats",
     "retrieve", "rerank", "RERANK_MODEL",
 ]

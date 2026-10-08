@@ -1,4 +1,4 @@
-"""Rebuild toan bo data: clean (classified -> processed) + index --rebuild (processed -> ChromaDB).
+"""Rebuild toan bo data: clean (classified -> processed) + index --rebuild (processed -> pgvector).
 
 Chay tu repo root:
     python tools/data/rebuild_data.py

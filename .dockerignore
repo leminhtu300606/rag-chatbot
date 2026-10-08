@@ -14,3 +14,6 @@ backups/
 *.crt
 .vscode/
 .idea/
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo

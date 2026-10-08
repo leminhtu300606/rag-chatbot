@@ -4,7 +4,7 @@ RAG Chatbot - Học viện Kỹ thuật Mật mã
 Package chính được tổ chức theo 3 phần RAG chuẩn + các lớp hỗ trợ:
 
 - backend.preprocessing  -> P1: Tiền xử lý (PDF/DOCX -> data/processed/*.parquet)
-- backend.indexing        -> P2: Indexing (embedding -> ChromaDB) + retrieval
+- backend.indexing        -> P2: Indexing (embedding -> PostgreSQL/pgvector) + retrieval
 - backend.generation      -> P3: Generation (retrieve -> rerank -> prompt -> LLM)
                             + agent đa bước (generation/agent.py, LangGraph self-check)
 - backend.api             -> Giao diện HTTP: FastAPI (app) + session + upload (api/app.py)
@@ -14,10 +14,8 @@ Package chính được tổ chức theo 3 phần RAG chuẩn + các lớp hỗ 
 - backend.security        -> Xác thực + phân quyền (security/auth.py)
 - backend.infra           -> Hạ tầng dùng chung: cache (infra/cache.py)
 
-Tương thích ngược (shim, không đổi logic):
-- backend.core / backend.utils / backend.auth / backend.cache / backend.agent
-  vẫn import được (re-export từ vị trí mới).
-- `python -m backend.cli`, `python -m backend.api`, `uvicorn backend.api:app` giữ nguyên.
+Entry points (giữ ổn định):
+- `python -m backend.cli`, `python -m backend.api`, `uvicorn backend.api:app`.
 
 Ví dụ nhanh:
     from backend.preprocessing.pipeline import process_all

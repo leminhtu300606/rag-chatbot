@@ -1,7 +1,7 @@
 """
 backend/indexing/retrieval.py - Cum truy xuat (gop tu retriever.py + bm25.py + hybrid.py)
 ==========================================================================================
-- Vector: truy xuat top-k chunk bang embedding (ChromaDB).
+- Vector: truy xuat top-k chunk bang embedding (PostgreSQL/pgvector).
 - BM25: lexical search tieng Viet (BM25Okapi thuan Python, cache theo mtime).
 - Hybrid: weighted sum BM25 + Vector (trong so tu config RETRIEVAL), fallback tung nhanh.
 
@@ -18,7 +18,7 @@ from typing import Dict, List, Tuple
 import backend.config.settings as cfg
 from backend.config.settings import RETRIEVE_TOP_K
 from backend.indexing.embedder import embed
-from backend.indexing.vectorstore import get_collection
+from backend.indexing.vectorstore import query_vector
 
 try:
     RETR_CFG = getattr(cfg, "RETRIEVAL", {})
@@ -28,8 +28,8 @@ except Exception:
 
 # ── Vector retrieval (gop tu retriever.py) ──
 
-def _query_chroma(q_emb, where, fetch_k: int) -> list[dict]:
-    """Helper query Chroma với where, bắt lỗi count."""
+def _query_pgvector(q_emb, where, fetch_k: int) -> list[dict]:
+    """Helper query pgvector với where, bắt lỗi count. Giữ tên cũ để caller không đổi."""
     try:
         from backend.indexing.vectorstore import count as _count
         total = _count()
@@ -40,32 +40,18 @@ def _query_chroma(q_emb, where, fetch_k: int) -> list[dict]:
     if fetch_k <= 0:
         return []
     try:
-        res = get_collection().query(
-            query_embeddings=[q_emb],
-            n_results=fetch_k,
-            where=where,
-        )
-        docs = res.get("documents", [[]])[0] or []
-        metas = res.get("metadatas", [[]])[0] or []
-        dists = res.get("distances", [[]])[0] or []
-        return [
-            {"text": d, "metadata": m, "score": float(s)}
-            for d, m, s in zip(docs, metas, dists)
-        ]
+        return query_vector(q_emb, where=where, n=fetch_k)
     except Exception:
         # where filter có thể lỗi nếu không có dữ liệu session
         # fallback về query không filter
         if where and "session_id" in str(where):
             try:
-                res = get_collection().query(query_embeddings=[q_emb], n_results=fetch_k, where=None)
-                docs = res.get("documents", [[]])[0] or []
-                metas = res.get("metadatas", [[]])[0] or []
-                dists = res.get("distances", [[]])[0] or []
+                docs = query_vector(q_emb, where=None, n=fetch_k)
                 # lọc thủ công theo session_id
                 out = []
-                for d, m, s in zip(docs, metas, dists):
+                for d in docs:
                     # giữ lại nếu metadata session_id khớp hoặc không có session filter gốc
-                    out.append({"text": d, "metadata": m, "score": float(s)})
+                    out.append(d)
                 return out
             except Exception:
                 return []
@@ -84,10 +70,10 @@ def retrieve(query: str, top_k: int = RETRIEVE_TOP_K, category: str = None, dedu
         sess_where = {"session_id": session_id}
         if category:
             sess_where["category"] = category
-        sess_docs = _query_chroma(q_emb, sess_where, fetch_k)
+        sess_docs = _query_pgvector(q_emb, sess_where, fetch_k)
         # 2) global (không filter session, nhưng có category nếu cần) -> lọc bỏ upload của phiên khác
         global_where = {"category": category} if category else None
-        global_docs_raw = _query_chroma(q_emb, global_where, fetch_k)
+        global_docs_raw = _query_pgvector(q_emb, global_where, fetch_k)
         # Lọc: chỉ giữ doc global thực sự (session_id is None / không có)
         global_docs = [d for d in global_docs_raw if not d.get("metadata", {}).get("session_id")]
         # Nếu global không đủ do lọc, vẫn có sess_docs
@@ -120,7 +106,7 @@ def retrieve(query: str, top_k: int = RETRIEVE_TOP_K, category: str = None, dedu
         return out
 
     where = {"category": category} if category else None
-    raw_all = _query_chroma(q_emb, where, fetch_k)
+    raw_all = _query_pgvector(q_emb, where, fetch_k)
     # Lọc bỏ upload theo phiên khi query global (không có session_id) để cô lập
     raw = [d for d in raw_all if not d.get("metadata", {}).get("session_id")] if raw_all else []
     if dedup and raw:
@@ -337,22 +323,14 @@ def bm25_search(query: str, top_k: int = 10, category: str | None = None) -> Lis
     # Dedup
     try:
         from backend.common.utils import deduplicate_docs
-        result = deduplicate_docs(result, threshold=0.92)
+        result = deduplicate_docs(result)
     except Exception:
         pass
     return result[:top_k]
 
 
-def clear_cache():
-    _BM25_CACHE["bm25"] = None
-    _BM25_CACHE["docs"] = None
-    _BM25_CACHE["mtime"] = 0.0
-    _BM25_CACHE["corpus_tokens"] = None
-    _BM25_CACHE_BY_CAT.clear()
-
-
 # ── Hybrid BM25 + Vector (gop tu hybrid.py, CPU-friendly) ──
-# Kết hợp vector search (Chroma) và BM25 lexical search.
+# Kết hợp vector search (pgvector) và BM25 lexical search.
 # Trọng số lấy từ config RETRIEVAL: vector_weight + bm25_weight.
 # Chuẩn hóa scores về [0,1] bằng min-max trước khi weighted sum.
 # Fallback: nếu BM25 không có kết quả thì chỉ dùng vector, và ngược lại.
@@ -362,7 +340,7 @@ def _normalize_scores(docs: List[Dict], score_key: str = "score") -> List[float]
         return []
     scores = [float(d.get(score_key, 0) or 0) for d in docs]
     # Với vector distance (cosine): nhỏ = gần, cần đảo
-    # Chroma trả distance, không phải similarity. Ta cần chuyển distance -> similarity
+    # pgvector trả distance, không phải similarity. Ta cần chuyển distance -> similarity
     # Nhưng retrieve trả score là distance, còn BM25 là higher better.
     # Để thống nhất, ta sẽ normalize theo rank: cao hơn = tốt hơn.
     # Với vector, ta sẽ đảo: similarity = 1 - distance (hoặc 1/(1+distance))
@@ -509,7 +487,7 @@ def hybrid_retrieve(query: str, top_k: int = 3, category: str | None = None, vec
     # Dedup lần cuối
     try:
         from backend.common.utils import deduplicate_docs
-        result = deduplicate_docs(result, threshold=0.92)
+        result = deduplicate_docs(result)
     except Exception:
         pass
 
@@ -520,6 +498,5 @@ __all__ = [
     "retrieve",
     "bm25_search",
     "hybrid_retrieve",
-    "clear_cache",
     "BM25Okapi",
 ]

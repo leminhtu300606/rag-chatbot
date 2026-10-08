@@ -1,7 +1,9 @@
 # RAG Chatbot - production stack (server nội bộ, <20 user)
-# Chạy:  cp .env.example .env   (sửa ADMIN_PASSWORD, OLLAMA model...)
+# Chạy:  cp .env.example .env   (sửa ADMIN_PASSWORD, POSTGRES_PASSWORD, OLLAMA model...)
 #        docker compose up -d --build
 #        docker compose exec ollama ollama pull ${LLM_MODEL:-qwen2.5:1.5b}
+#        docker compose exec app python -m backend.cli clean
+#        docker compose exec app python -m backend.cli index --rebuild
 services:
   app:
     build: .
@@ -9,15 +11,17 @@ services:
     env_file: .env
     environment:
       OLLAMA_BASE: http://ollama:11434
+      DATABASE_URL: postgresql://${POSTGRES_USER:-rag}:${POSTGRES_PASSWORD:-rag}@db:5432/${POSTGRES_DB:-rag}
     ports:
       - "127.0.0.1:8000:8000"   # chỉ loopback; ra ngoài qua nginx
     volumes:
-      - chroma_data:/app/chroma_db
       - app_data:/app/data
       - ./data/classified:/app/data/classified:ro
     depends_on:
       ollama:
         condition: service_started
+      db:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=8)"]
@@ -25,6 +29,24 @@ services:
       timeout: 10s
       retries: 3
       start_period: 180s
+
+  db:
+    image: pgvector/pgvector:0.8.0-pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-rag}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-rag}
+      POSTGRES_DB: ${POSTGRES_DB:-rag}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-rag}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   ollama:
     image: ollama/ollama:latest
@@ -50,6 +72,6 @@ services:
     restart: unless-stopped
 
 volumes:
-  chroma_data:
+  pgdata:
   app_data:
   ollama_data:

@@ -2,7 +2,7 @@
 backend/cli.py - Entry points CLI (gop tu cli/clean.py + cli/index.py)
 =======================================================================
 - clean: tien xu ly data tho -> data sach (logic trong preprocessing.pipeline)
-- index: build vector store tu data/processed (parquet -> ChromaDB)
+- index: build vector store tu data/processed (parquet -> PostgreSQL/pgvector)
 
 Chay:
   python -m backend.cli clean                 # lam sach toan bo data/classified
@@ -54,17 +54,12 @@ from backend.preprocessing.pipeline import (
 )
 
 # ── index: embedder / vectorstore / retrieval ──
-from backend.indexing.embedder import embed, get_model_info, get_dimension
+from backend.indexing.embedder import embed
 from backend.indexing.vectorstore import (
-    get_client,
-    get_collection,
     add_chunks,
     count,
     reset_collection,
-    peek,
     get_stats,
-    get_by_ids,
-    query_by_category,
 )
 from backend.indexing.retrieval import retrieve
 
@@ -138,7 +133,7 @@ def build(rebuild: bool = False) -> None:
         print("Không có dữ liệu mới. Số bản ghi hiện tại:", count())
         try:
             stats = get_stats()
-            print(f"  Stats ChromaDB: {stats}")
+            print(f"  Stats vector store: {stats}")
         except Exception:
             pass
         return
@@ -165,8 +160,8 @@ def build(rebuild: bool = False) -> None:
     # Chỉ thay collection sau khi embed thành công, tránh --rebuild làm mất index cũ
     # khi model hoặc phần cứng embedding gặp lỗi giữa chừng.
     if rebuild:
-        print("[build] --rebuild: xóa collection cũ...")
-        reset_collection()
+        print("[build] --rebuild: xóa bảng vector cũ...")
+        reset_collection(dim=len(embeddings[0]) if len(embeddings) > 0 else None)
 
     emb_dim = len(embeddings[0]) if len(embeddings) > 0 else 0
     print(f"  Embedding model: {cfg.EMBED_MODEL} | dim={emb_dim} | total={len(embeddings)}")
@@ -184,7 +179,7 @@ def build(rebuild: bool = False) -> None:
         for k in ["chunk_type", "block_type", "has_table", "has_image", "parent_context", "bbox", "table_data", "image_info"]:
             if k in c and c[k] is not None:
                 v = c[k]
-                # Nếu là dict/list thì json dump để Chroma metadata chỉ nhận str/int/float/bool
+                # Nếu là dict/list thì json dump (JSONB metadata chỉ nhận scalar, giới hạn độ dài)
                 if isinstance(v, (dict, list)):
                     import json as _json
                     try:
@@ -215,7 +210,7 @@ def build(rebuild: bool = False) -> None:
     add_chunks(items)
     _save_manifest(seen)
     print("Đã cập nhật vector store. Tổng bản ghi:", count())
-    print(f"  Đã lưu {len(items)} chunks + embeddings (dim={emb_dim}) vào ChromaDB collection '{cfg.COLLECTION_NAME}' tại {cfg.CHROMA_DIR}")
+    print(f"  Đã lưu {len(items)} chunks + embeddings (dim={emb_dim}) vào pgvector bảng '{cfg.PGVECTOR_TABLE}'")
     try:
         print(f"  Stats sau cập nhật: {get_stats()}")
     except Exception:
@@ -279,10 +274,9 @@ __all__ = [
     # clean (re-export tu pipeline)
     "clean_single_file", "clean_all", "show_stats", "clean_main",
     # embedder
-    "embed", "get_model_info", "get_dimension",
+    "embed",
     # vectorstore
-    "get_client", "get_collection", "add_chunks", "count", "reset_collection",
-    "peek", "get_stats", "get_by_ids", "query_by_category",
+    "add_chunks", "count", "reset_collection", "get_stats",
     # retrieval
     "retrieve",
     # build

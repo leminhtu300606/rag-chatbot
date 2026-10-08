@@ -3,7 +3,7 @@ backend/core.py - Cau hinh + security dung chung (gop tu core/config.py + core/s
 ============================================================================================
 PHAN CAU HINH (3 phan RAG):
 - PHAN 1 (preprocessing): DATA_DIR (raw PDF/DOCX) -> PROCESSED_DIR (artifact .parquet)
-- PHAN 2 (indexing):      PROCESSED_DIR -> CHROMA_DIR (vector store) + reranking
+- PHAN 2 (indexing):      PROCESSED_DIR -> Postgres/pgvector (vector store) + reranking
 - PHAN 3 (generation):    truy xuat + prompt + LLM (Ollama/Transformers)
 
 PHAN SECURITY (5 nhom):
@@ -24,9 +24,10 @@ DATA_DIR = BASE_DIR / "data" / "classified"  # dữ liệu thô: PDF, DOCX, TXT
 PROCESSED_DIR = BASE_DIR / "data" / "processed"  # artifact sau chunking: *.parquet (parquet)
 PROCESSED_EXT = ".parquet"  # dinh dang du lieu huan luyen: parquet (thay jsonl)
 
-# ── PHẦN 2: Indexing / Vector Store ──
-CHROMA_DIR = BASE_DIR / "chroma_db"
+# ── PHẦN 2: Indexing / Vector Store (PostgreSQL + pgvector) ──
 INDEXED_MANIFEST = PROCESSED_DIR / ".indexed.json"
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://rag:rag@localhost:5432/rag")
+PGVECTOR_TABLE = os.getenv("PGVECTOR_TABLE", "rag_chunks")
 
 LLM_BACKEND = "ollama"
 # qwen2.5:7b (~4.7GB) can ~8GB RAM/VRAM - can bang tot giua chat luong va tai nguyen
@@ -101,7 +102,6 @@ VISION = {
 
 # ── PHẦN 2: Retrieval & Reranking ──
 RETRIEVE_TOP_K = 5  # tang tu 4 -> 5 de dam bao cover du 5 chunk tot nhat cho correctness >=0.9
-COLLECTION_NAME = "rag_hvm"
 
 # ── PHẦN 3: Generation ──
 # LangChain incremental: boc Generation (ChatOllama + Prompt + LCEL + Memory),
@@ -605,10 +605,10 @@ def validate_sources(sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 __all__ = [
     # config
     "BASE_DIR", "DATA_DIR", "PROCESSED_DIR", "PROCESSED_EXT",
-    "CHROMA_DIR", "INDEXED_MANIFEST",
+    "INDEXED_MANIFEST", "DATABASE_URL", "PGVECTOR_TABLE",
     "LLM_BACKEND", "LLM_MODEL", "OLLAMA_BASE", "LLM_THINK",
     "CHUNK", "LAYOUT", "RETRIEVAL", "VISION",
-    "RETRIEVE_TOP_K", "COLLECTION_NAME",
+    "RETRIEVE_TOP_K",
     "USE_LANGCHAIN", "LANGCHAIN_STREAMING", "LANGCHAIN_TRACING",
     "USE_AGENT", "AGENT_MAX_STEPS",
     "GEN_MAX_TOKENS", "GEN_MAX_TOKENS_SOCIAL",

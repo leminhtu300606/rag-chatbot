@@ -46,7 +46,10 @@ backups/
 *.key
 *.crt
 
-# Node
+# Frontend (React+Vite): giữ lockfile để build reproducible
 node_modules/
-package-lock.json
-package.json
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+
+# Node (legacy)
