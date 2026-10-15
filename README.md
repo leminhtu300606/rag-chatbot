@@ -294,12 +294,3 @@ curl -X POST http://localhost:8000/api/chat \
 *   `src/components.tsx` — Sidebar lịch sử nhóm ngày, header bot + online, bubbles, quick-reply pills, composer (ô nhập + gửi + emoji + đính kèm), nguồn inline, uploads bar. Không còn sidebar 3 cột / panel nguồn rời / modal login-thống kê cũ.
 *   `src/api/client.ts` — Typed client cho mọi endpoint (`/api/chat`, `/api/chat/stream` SSE, sessions, uploads, auth...), tự gắn Bearer `rag_token`.
 *   Dùng mặc định `use_rerank=true`, luôn nhớ hội thoại. Hỗ trợ gõ `quy_che: câu hỏi` để lọc danh mục ngay trong ô chat. Keys `localStorage`: `rag_sessions_v2`, `rag_active_session_v2`, `rag_token`.
-
----
-
-## 9. Lưu ý
-
-*   **Parquet:** `storage.py` đọc được cả `parquet` và `jsonl` cũ để migrate: `python -m backend.preprocessing.storage --migrate` (cần `pandas` + `pyarrow` đã có trong `requirements.txt`).
-*   **Ollama lỗi:** Nếu gặp `out-of-memory` → đổi `LLM_MODEL` sang `qwen2.5:1.5b`/`0.5b`; nếu `connection refused` → kiểm tra `ollama serve` và `ollama list`.
-*   **Dimension mismatch:** Chạy `python -m backend.cli index --rebuild` sau khi đổi `EMBED_MODEL`.
-*   **Session:** In-memory, TTL 24h, tối đa 200 phiên, mỗi phiên tối đa 100 messages; xóa bằng `DELETE /api/sessions/{id}`, nút 🗑 trong sidebar, hoặc tạo phiên mới (mở app luôn vào phiên mới).
