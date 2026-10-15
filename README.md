@@ -1,93 +1,72 @@
 ﻿# RAG Chatbot — Học viện Kỹ thuật Mật mã
 
-Hệ thống **hỏi-đáp tiếng Việt trên kho tài liệu nội bộ** (quy chế, quy định, quyết định, thông báo, tài liệu hướng dẫn) theo mô hình **Retrieval-Augmented Generation (RAG) có hội thoại**.
+Chatbot hỏi-đáp tiếng Việt trên tài liệu nội bộ như quy chế, quy định, quyết định, thông báo.
 
-Trọng tâm: trả lời **chỉ dựa trên tài liệu truy xuất được**, trích dẫn nguồn, hiểu câu hỏi nối tiếp (“nó là gì?”, “nói rõ hơn”), nói thẳng khi không đủ nguồn thay vì bịa.
+Nguyên tắc: chỉ trả lời dựa trên tài liệu tìm được, luôn kèm nguồn. Hiểu được câu hỏi nối tiếp kiểu “nó là gì?”, “nói rõ hơn”. Nếu không đủ tài liệu thì nói thẳng, không bịa.
 
-## 1. Hướng giải quyết
+## Công nghệ chính
 
-```
-[PDF/DOCX] → Preprocessing (clean + chunk) → data/processed/*.parquet
-                                                    ↓ embed
-User → React → FastAPI /api/chat → [rewrite query → hybrid retrieve → rerank → LLM sinh trả lời] → answer + sources
-                                    ↑ session (window 8 turns + summary) lưu server + localStorage
-```
-
-1. **Tiền xử lý:** đọc PDF (PyMuPDF + OCR EasyOCR) / DOCX, bỏ header/footer, chunk ngữ nghĩa + ngữ cảnh (giữ tiêu đề Chương/Điều, overlap 1 câu).
-2. **Indexing:** embed từng chunk → PostgreSQL/pgvector. Truy xuất **hybrid BM25 (0.6) + vector (0.4)**, build incremental theo `mtime`.
-3. **Generation:** viết lại câu hỏi mơ hồ thành câu độc lập → retrieve → **rerank cross-encoder** → prompt grounded + lịch sử (8 turns gần nhất + tóm tắt phần cũ) → LLM sinh trả lời kèm `sources`. Agent LangGraph tự kiểm tra nguồn (tối đa 3 bước), lỗi thì fallback manual. Streaming SSE mặc định.
-
-## 2. Công nghệ, framework, model
-
-| Lớp | Công nghệ / Model |
+| Phần | Dùng gì |
 |---|---|
-| **Backend** | Python 3.10+, **FastAPI** + Uvicorn, `psycopg` + `pgvector` (PostgreSQL 16, bảng `rag_chunks`, HNSW cosine) |
-| **Preprocessing** | `pymupdf`, `easyocr`, `python-docx`, `underthesea`, `pandas` + `pyarrow` (parquet) |
-| **Embedding** | `dangvantuan/vietnamese-embedding` (768d, CPU) / `BAAI/bge-m3` (GPU, tự chọn theo `DEVICE`) + `rank-bm25` |
-| **Rerank** | Cross-encoder `ms-marco-MiniLM-L-6-v2`, `top_k=4` |
-| **LLM** | **Ollama `qwen2.5:1.5b`** (mặc định, đổi được `0.5b/3b/7b/14b/32b` qua `LLM_MODEL`), bọc bằng **LangChain** (ChatOllama + LCEL) + **LangGraph** agent |
-| **Frontend** | **React 18 + TypeScript + Vite**, `react-markdown`, SSE streaming, sidebar lịch sử theo ngày |
-| **Infra** | Docker Compose (`app` + `db` pgvector + `ollama` + `nginx` TLS nội bộ) |
+| Web API | Python + FastAPI, lưu vector trong PostgreSQL + pgvector |
+| Đọc tài liệu | PyMuPDF, EasyOCR tiếng Việt, python-docx |
+| Hiểu tiếng Việt | Model embedding tiếng Việt, tìm kiếm kết hợp từ khóa + ngữ nghĩa, chấm lại bằng cross-encoder |
+| Trả lời | Ollama model Qwen 2.5 (mặc định bản 1.5B) + LangChain + LangGraph |
+| Giao diện | React + TypeScript + Vite, trả lời hiện dần theo thời gian thực |
 
-## 3. Cấu trúc dự án
+Luồng chung:
 
 ```
-backend/
-  preprocessing/  # loader (PDF/OCR/DOCX) → cleaner → chunker → pipeline → *.parquet
-  indexing/       # embedder → vectorstore (pgvector) → retrieval (hybrid)
-  generation/     # rag.py (điều phối) → reranker → generator/prompts → agent (LangGraph) + calculator
-  api/app.py      # FastAPI + session + SSE /api/chat/stream
-  cli/main.py     # python -m backend.cli <clean|index>
-frontend/         # React+Vite (src/App.tsx, components.tsx, api/client.ts)
-tools/            # data/rebuild_data.py, eval/eval_quick.py, ops/backup.py
-data/classified/  # PDF/DOCX thô theo category | data/processed/ # *.parquet
+Tài liệu PDF/DOCX → làm sạch + cắt đoạn → chuyển thành vector → lưu vào kho
+Câu hỏi → viết lại cho rõ ý → tìm đoạn liên quan → xếp hạng lại → nhờ AI viết trả lời kèm nguồn
 ```
 
-## 4. Chạy nhanh
+## 1. Chuẩn bị tài liệu
+
+Tài liệu thô nằm trong `data/classified`, chia theo nhóm như quy chế, quy định, thông báo.
+
+* **Đọc tài liệu:** lấy chữ từ file Word và PDF giữ đúng thứ tự đọc. Bảng biểu giữ nguyên dạng bảng. Trang nào là ảnh scan, chữ quá ít thì tự chuyển sang quét chữ bằng OCR.
+* **Làm sạch:** bỏ phần rườm rà như quốc hiệu, tên học viện, số văn bản, ngày tháng ban hành ở đầu trang, số trang, chữ ký. Chỉ giữ nội dung chính.
+* **Cắt đoạn:** tách thành từng đoạn ngắn khoảng 200–1200 ký tự để dễ tìm. Đoạn nào cũng giữ lại tên Chương, Điều, Mục để không bị mất ngữ cảnh. Bảng và hình được giữ riêng kèm phần giải thích xung quanh.
+* Kết quả lưu thành file parquet trong `data/processed` để dùng cho bước sau.
+
+## 2. Tìm kiếm tài liệu liên quan
+
+Mỗi đoạn văn được chuyển thành vector tiếng Việt rồi lưu vào cơ sở dữ liệu.
+
+Khi có câu hỏi, hệ thống tìm theo 2 cách cùng lúc:
+
+* Theo nghĩa: đoạn nào gần nghĩa với câu hỏi nhất.
+* Theo từ khóa: đoạn nào chứa đúng từ quan trọng như tên quy định, số hiệu, mức phần trăm.
+
+Hai kết quả được gộp lại, ưu tiên từ khóa hơn một chút, lọc bỏ đoạn trùng lặp. File người dùng tải lên trong phiên chat chỉ dùng cho phiên đó, không lẫn vào kho chung.
+
+## 3. Viết câu trả lời
+
+* **Làm rõ câu hỏi:** câu cụt như “nó là gì?” được viết lại thành câu đầy đủ dựa trên đoạn chat trước đó để tìm cho đúng.
+* **Nhớ hội thoại:** giữ khoảng 8 lượt hỏi đáp gần nhất, phần cũ hơn được tóm tắt gọn lại nên không quên câu đầu phiên.
+* **Xếp hạng lại:** các đoạn tìm được được chấm điểm lại một lần nữa, chỉ giữ 4 đoạn khớp nhất để đưa cho AI.
+* **Dặn AI:** chỉ dùng tài liệu được đưa, câu nào cũng phải có căn cứ, thiếu tài liệu thì báo không đủ nguồn. Trả lời bằng tiếng Việt, trình bày gọn bằng tiêu đề, gạch đầu dòng, bảng khi cần.
+* **Tự kiểm tra:** hệ thống kiểm tra đáp án có trống không, có trích dẫn không, từ khóa chính có trong tài liệu không. Chưa đạt thì tìm lại và viết lại, tối đa 3 lần.
+* **Trường hợp riêng:** phép tính thì tính bằng công cụ tính chính xác thay vì để AI nhẩm. Câu chào hỏi xã giao thì trả lời ngắn, không cần tìm tài liệu. Câu quá chung chung thì hỏi lại cho rõ thay vì đoán bừa.
+
+## 4. Giao diện và kết nối
+
+* Giao diện web kiểu chat quen thuộc: khung chat ở giữa, lịch sử ở bên trái nhóm theo ngày, nguồn tài liệu hiện ngay dưới câu trả lời, có gợi ý câu hỏi và đính kèm file.
+* Máy chủ cung cấp 2 kiểu hỏi đáp: kiểu thường và kiểu hiện chữ dần. Có đường kiểm tra sức khỏe, xem thống kê, quản lý phiên chat.
+
+## 5. Chạy thử nhanh
 
 ```powershell
-python -m venv venv; .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-ollama pull qwen2.5:1.5b; ollama serve   # terminal riêng
-
-python -m backend.cli clean               # classified → processed/*.parquet
-python -m backend.cli index --rebuild     # embed → pgvector (lần sau bỏ --rebuild để incremental)
-.\start-server.bat                        # uvicorn :8000 (API + serve frontend)
-# Mở http://127.0.0.1:8000/ | Docs http://127.0.0.1:8000/docs | Health /api/health
+ollama pull qwen2.5:1.5b
+python -m backend.cli clean
+python -m backend.cli index --rebuild
+.\start-server.bat
 ```
 
-Docker (server nội bộ):
+Mở trình duyệt vào `http://127.0.0.1:8000/`.
 
-```bash
-cp .env.example .env   # sửa ADMIN_PASSWORD, POSTGRES_PASSWORD, LLM_MODEL
-docker compose up -d --build
-docker compose exec ollama ollama pull ${LLM_MODEL:-qwen2.5:1.5b}
-docker compose exec app python -m backend.cli clean
-docker compose exec app python -m backend.cli index --rebuild
-```
+Muốn chạy bằng Docker thì copy `.env.example` thành `.env`, chạy `docker compose up -d --build`, tải model rồi nạp dữ liệu như các lệnh ở trên.
 
-## 5. API chính
-
-| Method | Endpoint | Mô tả |
-|---|---|---|
-| POST | `/api/chat` | Hỏi-đáp hội thoại (blocking, fallback) |
-| POST | `/api/chat/stream` | Streaming SSE (UI dùng mặc định) |
-| GET | `/api/health` | `vector_count`, `processed_files`, `ollama_ok` |
-| GET/DELETE | `/api/sessions`, `/api/sessions/{id}` | Quản lý phiên hội thoại |
-
-Request `POST /api/chat`:
-```json
-{"question": "Học bổng KKHT xét thế nào?", "category": "thong_bao", "top_k": 4, "use_rerank": true, "session_id": "uuid", "history": []}
-```
-Response: `{answer, sources[{filename, page, category}], standalone_question, session_id, summary}`.
-
-## 6. Cấu hình chính (`backend/config/settings.py` + `.env`)
-
-`EMBED_MODEL`, `LLM_MODEL=qwen2.5:1.5b`, `OLLAMA_BASE`, `DATABASE_URL`, `RETRIEVE_TOP_K=5`, `CONVERSATION_WINDOW=8`, `CONVERSATION_SUMMARY_THRESHOLD=10`, `USE_AGENT=true`, `AGENT_MAX_STEPS=3`. Đổi model embedding phải `index --rebuild` lại.
-
-## 7. Lưu ý
-
-* 1 port = 1 server: lỗi `10048` thì chạy `.\stop-server.bat` trước.
-* Đổi `LLM_MODEL` khi hết RAM: `qwen2.5:0.5b/1.5b`; lỗi Ollama `connection refused` thì kiểm tra `ollama serve`.
-* Session in-memory (TTL 24h, tối đa 200 phiên); upload PDF/DOCX/TXT/MD theo phiên, không vào kho chung.
-* Giấy phép: dự án nội bộ Học viện Kỹ thuật Mật mã.
+Đổi model trả lời hay model embedding thì chỉnh trong file cấu hình chung, đổi embedding phải nạp lại dữ liệu từ đầu.
