@@ -1,0 +1,151 @@
+{
+  "n": 10,
+  "top_k": 5,
+  "model": "qwen2.5:1.5b",
+  "retrieval": {
+    "hit_at_k": 1.0,
+    "mrr_at_k": 1.0,
+    "context_precision": 0.5,
+    "context_recall": 1.0
+  },
+  "generation": {
+    "lexical_f1": 0.5458863590967774,
+    "keyword_coverage": 0.725,
+    "faithfulness_heuristic": 1.0,
+    "judge_faithfulness": null,
+    "judge_relevancy": null,
+    "judge_correctness": null
+  },
+  "rows": [
+    {
+      "q": "Sinh viên khi đến trường phải mặc trang phục thế nào?",
+      "hit": true,
+      "mrr": 1.0,
+      "prec": 0.4,
+      "recall": 1.0,
+      "f1": 0.5531914893617021,
+      "kw": 0.75,
+      "faith_h": 1.0,
+      "judge": {},
+      "answer": "Sinh viên khi đến trường phải mặc trang phục gọn gàng, lịch sự, kín đáo:\n- Mặc áo có cổ áo, tay áo lịch sự;\n- Mặc quần dài;\n- Không đi dép lê, dép xỏ ngón;\n- Học viên-sinh viên nữ không mặc váy trên đầu gối, váy xẻ cao hoặc áo, váy quá mỏng (hoặc gây phản cảm, trái thuần phong mỹ tục).",
+      "n_ctx": 5
+    },
+    {
+      "q": "Xét học bổng khuyến khích học tập kỳ 1 năm 2025-2026 căn cứ vào văn bản nào?",
+      "hit": true,
+      "mrr": 1.0,
+      "prec": 0.4,
+      "recall": 1.0,
+      "f1": 0.626865671641791,
+      "kw": 0.6666666666666666,
+      "faith_h": 1.0,
+      "judge": {},
+      "answer": "Căn cứ vào Nghị định số: 84/2020/NĐ-CP ngày 17 tháng 7 năm 2020 về học bổng khuyến khích học tập và học bổng chính sách cho học sinh, sinh viên.",
+      "n_ctx": 5
+    },
+    {
+      "q": "Điều kiện học tập để sinh viên được xét học bổng khuyến khích học tập là gì?",
+      "hit": true,
+      "mrr": 1.0,
+      "prec": 0.4,
+      "recall": 1.0,
+      "f1": 0.09433962264150943,
+      "kw": 0.0,
+      "faith_h": 1.0,
+      "judge": {},
+      "answer": "Sinh viên được xét học bổng khuyến khích học tập cần đáp ứng các điều kiện sau:\n\n1. Điểm trung bình chung tích lũy (TBCTL) học tập đạt loại Khá: 3.0 trở lên (điểm thi lần 1, không có môn thi lại, học lại, các môn không tính điểm cần phải đạt).\n\n2. Rèn luyện: Sinh viên cần có điểm rèn luyện từ loại K",
+      "n_ctx": 5
+    },
+    {
+      "q": "Chế độ miễn, giảm học phí học kỳ 2 năm học 2025-2026 thực hiện theo văn bản nào?",
+      "hit": true,
+      "mrr": 1.0,
+      "prec": 0.8,
+      "recall": 1.0,
+      "f1": 0.4132231404958678,
+      "kw": 1.0,
+      "faith_h": 1.0,
+      "judge": {},
+      "answer": "Chế độ miễn, giảm học phí học kỳ 2 năm học 2025-2026 thực hiện theo văn bản sau:\n\n1. Nghị định số 238/2025/NĐ-CP của Chính phủ, ban hành ngày 03 tháng 9 năm 2025 về Quy định về cơ chế thu, quản lý học phí đối với cơ sở giáo dục thuộc hệ thống giáo dục quốc dân và chính sách miễn, giảm học phí, hỗ tr",
+      "n_ctx": 5
+    },
+    {
+      "q": "Thí sinh muốn phúc khảo bài thi kết thúc học phần phải làm gì?",
+      "hit": true,
+      "mrr": 1.0,
+      "prec": 0.6,
+      "recall": 1.0,
+      "f1": 0.8571428571428571,
+      "kw": 1.0,
+      "faith_h": 1.0,
+      "judge": {},
+      "answer": "Thí sinh muốn phúc khảo bài thi kết thúc học phần phải làm đơn và đóng lệ phí phúc khảo chậm nhất 7 ngày làm việc, kể từ ngày công bố kết quả đánh giá học phần.",
+      "n_ctx": 5
+    },
+    {
+      "q": "Quy định về công tác khảo thí nhằm mục đích gì?",
+      "hit": true,
+      "mrr": 1.0,
+      "prec": 0.4,
+      "recall": 1.0,
+      "f1": 0.45033112582781454,
+      "kw": 1.0,
+      "faith_h": 1.0,
+      "judge": {},
+      "answer": "Quy định về công tác khảo thí nhằm mục đích:\n1. Làm căn cứ để Giám đốc Học viện phân công, bố trí, sử dụng nhân lực hợp lý, tăng cường hiệu quả công tác quản lý, thanh tra, giám sát, khen thưởng đối với công tác khảo thí.\n2. Làm cơ sở để các đơn vị, cá nhân có liên quan thực hiện tốt chức năng, nhiệ",
+      "n_ctx": 5
+    },
+    {
+      "q": "Học viên bị kỷ luật thì xếp loại rèn luyện thế nào?",
+      "hit": true,
+      "mrr": 1.0,
+      "prec": 0.6,
+      "recall": 1.0,
+      "f1": 0.38297872340425526,
+      "kw": 0.3333333333333333,
+      "faith_h": 1.0,
+      "judge": {},
+      "answer": "Học viên bị kỷ luật sẽ xếp loại rèn luyện kém.",
+      "n_ctx": 5
+    },
+    {
+      "q": "Vì sao cấm sử dụng đồng hồ thông minh trong thi cử?",
+      "hit": true,
+      "mrr": 1.0,
+      "prec": 0.4,
+      "recall": 1.0,
+      "f1": 0.847457627118644,
+      "kw": 1.0,
+      "faith_h": 1.0,
+      "judge": {},
+      "answer": "Vì cấm sử dụng đồng hồ thông minh trong thi cử để ngăn chặn gian lận và đảm bảo sự công bằng, khách quan trong đánh giá kết quả người học.",
+      "n_ctx": 5
+    },
+    {
+      "q": "Sinh viên không thuộc chuyên ngành Kỹ thuật mật mã khi đến trường phải mang theo gì?",
+      "hit": true,
+      "mrr": 1.0,
+      "prec": 0.6,
+      "recall": 1.0,
+      "f1": 0.5666666666666667,
+      "kw": 1.0,
+      "faith_h": 1.0,
+      "judge": {},
+      "answer": "Sinh viên không thuộc chuyên ngành Kỹ thuật mật mã khi đến trường phải mang theo:\n- Thẻ học viên-sinh viên được Học viện cấp khi đến trường;\n- Trang phục gọn gàng, lịch sự, kín đáo theo quy định của Học viện.",
+      "n_ctx": 5
+    },
+    {
+      "q": "Học bổng khuyến khích học tập kỳ 1 năm 2025-2026 dành cho đối tượng sinh viên nào?",
+      "hit": true,
+      "mrr": 1.0,
+      "prec": 0.4,
+      "recall": 1.0,
+      "f1": 0.6666666666666667,
+      "kw": 0.5,
+      "faith_h": 1.0,
+      "judge": {},
+      "answer": "Học bổng khuyến khích học tập kỳ 1 năm 2025-2026 dành cho sinh viên hệ dân sự.",
+      "n_ctx": 5
+    }
+  ]
+}

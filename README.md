@@ -1,296 +1,341 @@
 ﻿# RAG Chatbot - Học viện Kỹ thuật Mật mã
 
-Hệ thống **Retrieval-Augmented Generation (RAG)** cho phép hỏi-đáp trên kho tài liệu nội bộ (quy chế, quy định, quyết định, tài liệu hướng dẫn, thông báo) với khả năng **hội thoại có ngữ cảnh** (hiểu câu hỏi nối tiếp như “nó là gì?”, “nói rõ hơn”).
+Chatbot hỏi đáp tiếng Việt trên kho tài liệu nội bộ như quy chế, quy định, quyết
+định, thông báo và tài liệu hướng dẫn. Hệ thống sử dụng **Retrieval-Augmented
+Generation (RAG)**: tìm các đoạn tài liệu liên quan, đưa chúng vào prompt, rồi
+gọi LLM để tạo câu trả lời có trích dẫn nguồn.
 
-> **Đặc điểm chính:** Truy xuất bằng embedding tiếng Việt (lưu ở PostgreSQL/pgvector) → rerank bằng cross-encoder → sinh câu trả lời bằng LLM (Ollama `qwen2.5` mặc định), có viết lại câu hỏi (query rewriting), quản lý lịch sử hội thoại dạng cửa sổ + tóm tắt, lưu phiên (session) phía server và localStorage.
+> Đây là hệ thống hỗ trợ tra cứu, không thay thế văn bản pháp quy hoặc quyết
+> định chính thức. Khi câu trả lời quan trọng, hãy mở nguồn tài liệu được trả
+> về để kiểm tra.
 
----
+## 1. Tính năng và cách hoạt động
 
-## 1. Kiến trúc tổng quan
+- Đọc PDF, PDF scan (OCR), DOCX và TXT.
+- Làm sạch header/footer, số trang và nội dung nhiễu; chia tài liệu thành các
+  chunk theo cấu trúc/ngữ cảnh.
+- Tạo embedding tiếng Việt và lưu trong PostgreSQL + pgvector.
+- Truy hồi kết hợp vector search và BM25; có thể rerank bằng cross-encoder.
+- Viết lại câu hỏi nối tiếp, giữ cửa sổ lịch sử và tóm tắt hội thoại dài.
+- Sinh câu trả lời bằng Ollama (mặc định `qwen2.5:1.5b`).
+- Hỗ trợ streaming SSE, phiên hội thoại, upload tài liệu theo phiên và giao diện
+  React.
+- Có giới hạn tốc độ, quota, cache, log hội thoại và tùy chọn ClamAV.
 
+### Luồng RAG
+
+```text
+PDF/DOCX/TXT
+    -> loader -> cleaner -> chunker
+    -> data/processed/*.parquet
+    -> embedding -> PostgreSQL/pgvector (rag_chunks)
+
+Người dùng -> React/Vite -> FastAPI
+    -> viết lại câu hỏi (nếu cần)
+    -> hybrid retrieval (vector + BM25)
+    -> rerank (tùy chọn)
+    -> prompt + lịch sử -> Ollama
+    -> answer + sources
 ```
-[PDF/DOCX] ──► Preprocessing (loader → cleaner → chunker) ──► data/processed/*.parquet
-                                                                   │
-                                                                   ▼
-                                                           Indexing (embedder → PostgreSQL/pgvector) ──► bảng rag_chunks
-                                                                   │
-                                                                   ▼
-User ──► Frontend (React+Vite) ──► FastAPI (/api/chat) ──► Generation (retrieve → rerank → prompt → LLM)
-                                              ▲                              │
-                                              │                              ▼
-                                         Session Store                  answer + sources
-                                        (history, summary)
-```
 
-**Luồng hội thoại (conversational):**
+Với câu hỏi có ngữ cảnh, hệ thống dùng lịch sử để tạo một câu hỏi độc lập cho
+khâu truy hồi, nhưng vẫn dùng câu hỏi gốc và lịch sử phù hợp khi sinh câu trả
+lời. Khi không dùng được vector store, benchmark offline có thể chạy nhánh
+BM25 trên dữ liệu đã xử lý.
 
-```
-Câu hỏi mới + Lịch sử
-       │
-       ├─► _prepare_history(): cắt cửa sổ CONVERSATION_WINDOW*2, tóm tắt nếu > CONVERSATION_SUMMARY_THRESHOLD
-       │
-       ├─► rewrite_query(): phát hiện đại từ mơ hồ → LLM viết lại thành câu độc lập (dùng cho retrieval)
-       │
-       ├─► retrieve(standalone_question) → rerank(standalone_question)
-       │
-       └─► generate_with_history(context, question_gốc, history_window, summary) → trả lời tự nhiên
-```
+## 2. Kiến trúc và cấu trúc thư mục
 
----
-
-## 2. Cấu trúc dự án
-
-```
+```text
 E:\rag\
 ├── data/
-│   ├── classified/                 # Dữ liệu thô (PDF, DOCX) theo category
-│   │   ├── quyet_dinh/thanh_tra/
-│   │   ├── quy_che/cong_tac_hsv / dao_tao/
-│   │   ├── quy_dinh/khao_thi / van_hoa_hoc_duong/
-│   │   ├── tai_lieu_huong_dan/dao_tao / ky_nang_sv/
-│   │   └── thong_bao/hoc_bong / hoc_phi / ky_thi/
-│   ├── processed/                  # Artifact sau tiền xử lý: *.parquet
-│   │   └── .indexed.json           # manifest mtime (key posix) cho build incremental
-│   ├── uploads/                    # File upload theo phiên (không commit)
+│   ├── classified/                 # PDF/DOCX/TXT đầu vào, phân theo category
+│   ├── processed/                  # parquet và .indexed.json
+│   └── uploads/                    # upload theo phiên, không commit
 ├── backend/
-│   ├── api/app.py                  # Giao diện HTTP: FastAPI + serve frontend, quản lý session
-│   ├── cli/main.py                 # Giao diện CLI: clean / index (python -m backend.cli <clean|index>)
-│   ├── config/settings.py          # Cấu hình chung + security dùng chung
-│   ├── common/utils.py             # dedup (chuẩn hóa + loại trùng lặp)
-│   ├── security/auth.py            # Xác thực + phân quyền
-│   ├── infra/cache.py              # Cache câu hỏi lặp
-│   ├── preprocessing/              # PHẦN 1: Tiền xử lý
-│   │   ├── loader.py               # PDF (pymupdf + OCR easyocr) & DOCX
-│   │   ├── cleaner.py              # Bỏ header/footer, số trang, quốc huy
-│   │   ├── chunker.py              # Semantic + Contextual chunking
-│   │   ├── pipeline.py             # process_file/process_all → *.parquet (+ clean_*, show_stats, CLI)
-│   │   ├── storage.py              # Helper parquet (đọc/ghi, hỗ trợ jsonl cũ)
-│   ├── indexing/                   # PHẦN 2: Indexing
-│   │   ├── embedder.py             # dangvantuan/vietnamese-embedding
-│   │   ├── vectorstore.py          # PostgreSQL/pgvector (bảng rag_chunks)
-│   │   └── retrieval.py            # Cụm truy xuất: vector + BM25 + hybrid
-│   ├── generation/                 # PHẦN 3: Generation
-│   │   ├── agent.py                # Agent đa bước (LangGraph self-check, max AGENT_MAX_STEPS)
-│   │   ├── prompts.py              # SYSTEM_PROMPT, build_messages, rewrite/summary prompts
-│   │   ├── generator.py            # Ollama / transformers, rewrite_query, summarize_history
-│   │   ├── langchain_chain.py      # Adapter LangChain (ChatOllama + LCEL)
-│   │   ├── reranker.py             # cross-encoder ms-marco-MiniLM-L-6-v2
-│   │   ├── rag.py                  # Điều phối retrieve → rerank → generate (agent-first, fallback manual)
-│   │   ├── calculator.py           # Tính toán chính xác bằng Decimal
-├── tools/                          # Vận hành (trước đây scripts/)
-│   ├── data/rebuild_data.py        # Rebuild toàn bộ: clean + index --rebuild + verify
-│   ├── eval/eval_quick.py          # Đánh giá nhanh qua HTTP API
-│   └── ops/backup.py               # Backup/restore pgvector + processed + sessions + users
-├── infra/nginx/
-│   └── nginx.conf                  # Reverse proxy + TLS nội bộ (trước đây deploy/nginx.conf)
-├── frontend/                       # React + TypeScript + Vite (build ra dist/, FastAPI serve)
-│   ├── index.html
-│   ├── package.json / vite.config.ts / tsconfig.json
-│   └── src/ (App.tsx, components.tsx, api/client.ts, types.ts, hooks.ts, utils.ts, styles.css)
+│   ├── api/app.py                  # FastAPI, chat, session, upload, auth
+│   ├── cli/main.py                 # python -m backend.cli clean|index
+│   ├── config/settings.py          # cấu hình runtime
+│   ├── security/auth.py            # xác thực và phân quyền
+│   ├── infra/cache.py              # cache câu hỏi
+│   ├── preprocessing/              # loader, cleaner, chunker, storage
+│   ├── indexing/                   # embedder, vectorstore, retrieval
+│   └── generation/                 # RAG, agent, prompt, reranker, calculator
+├── frontend/                       # React + TypeScript + Vite
+├── tools/
+│   ├── data/rebuild_data.py        # clean + rebuild index + verify
+│   ├── eval/eval_rag.py            # benchmark 10 câu ground-truth
+│   ├── eval/eval_quick.py          # smoke test qua HTTP API
+│   └── ops/backup.py               # backup/restore dữ liệu vận hành
+├── infra/nginx/nginx.conf          # reverse proxy/TLS tùy chọn
+├── docker-compose.yml              # app, PostgreSQL/pgvector, Ollama, nginx
 ├── requirements.txt
-├── start-server.bat              # Khởi động sạch: dọn port 8000 rồi chạy uvicorn
-├── stop-server.bat               # Tắt server đang nghe port 8000
-└── README.md
+├── .env.example
+├── start-server.bat
+└── stop-server.bat
 ```
 
-| Chạy nhanh | Lệnh |
-|---|---|
-| Rebuild toàn bộ data | `python tools/data/rebuild_data.py` |
-| Chỉ clean | `python -m backend.cli clean` |
-| Chỉ index | `python -m backend.cli index --rebuild` |
-| Kiểm tra | `python -m backend.cli clean --stats` (xem /api/health để biết số files/vectors) |
-| Chạy API | `start-server.bat` (khởi động sạch) hoặc `uvicorn backend.api:app --host 127.0.0.1 --port 8000` |
-| Tắt server | `stop-server.bat` |
+| Thành phần | Công nghệ | Vai trò |
+|---|---|---|
+| API | Python, FastAPI | Chat, session, upload, health và auth |
+| Tiền xử lý | PyMuPDF/OCR, DOCX, Parquet | Chuẩn hóa và chia nhỏ tài liệu |
+| Truy hồi | PostgreSQL/pgvector, BM25 | Tìm context liên quan |
+| Sinh câu trả lời | Ollama, LangChain/LangGraph | Prompt, agent, LLM và lịch sử |
+| Giao diện | React 18, TypeScript, Vite | Chat, streaming, session, nguồn |
+| Reverse proxy | Nginx | Truy cập nội bộ, giới hạn upload/rate và TLS |
 
-| Phần | Nhiệm vụ | Input → Output | Thư mục |
-|------|----------|----------------|---------|
-| **Tiền xử lý** | Làm sạch & chunk | `data/classified` → `data/processed/*.parquet` | `backend/preprocessing/` |
-| **Indexing** | Embed → Vector Store | `data/processed/*.parquet` → PostgreSQL (`rag_chunks`) | `backend/indexing/` + `backend/cli/main.py` |
-| **Generation** | Rerank + Prompt + LLM | `query (+ history)` → `{answer, sources}` | `backend/generation/` |
-| **API** | FastAPI + Session | `HTTP` → `JSON` | `backend/api/app.py` |
-| **Frontend** | Giao diện chat | Người dùng → API | `frontend/` |
+## 3. Yêu cầu
 
----
+### Chạy local
 
-## 3. Tính năng chính
+- Python 3.10 trở lên.
+- Node.js 20 trở lên nếu phát triển frontend riêng.
+- PostgreSQL 16 có extension pgvector.
+- Ollama đang chạy và có model LLM.
+- Đủ RAM/VRAM cho model đã chọn; `qwen2.5:1.5b` phù hợp máy CPU hạn chế
+  hơn các model 7B.
 
-*   **Tiền xử lý:** Hỗ trợ PDF (bản quét OCR) và DOCX, làm sạch header/footer, chunking ngữ nghĩa + ngữ cảnh (giữ tiêu đề Chương/Điều, overlap câu).
-*   **Indexing:** Embedding `dangvantuan/vietnamese-embedding`, pgvector cosine (HNSW, distance 0~2 như cũ), build incremental theo `mtime` + manifest.
-*   **Rerank:** Cross-encoder `ms-marco-MiniLM-L-6-v2`, mặc định `top_k=4` (xem `DEFAULT_RERANK_TOP_K`).
-*   **Hội thoại có ngữ cảnh:**
-    *   Viết lại câu hỏi mơ hồ thành dạng độc lập (heuristic + LLM) để retrieval chính xác.
-    *   Quản lý cửa sổ lịch sử `CONVERSATION_WINDOW=8` turns, cắt mỗi message `600` ký tự.
-    *   Tự động tóm tắt khi vượt `CONVERSATION_SUMMARY_THRESHOLD=10` turns.
-    *   Lưu phiên in-memory trên server (`session_id`) + `localStorage` trên client, có endpoint `GET/DELETE /api/sessions/{id}`.
-*   **Trả lời streaming (mặc định):** `POST /api/chat/stream` (SSE) hiện chữ dần + trạng thái từng bước (`Đang tìm tài liệu…` → `Đang sinh câu trả lời…`), single-pass không agent-retry để thời gian bounded; `/api/chat` blocking giữ làm fallback tự động.
-*   **Giao diện (ChatGPT-style):** sidebar lịch sử nhóm theo ngày (Hôm nay / Hôm qua / 7 ngày qua / Cũ hơn) + nút Đoạn chat mới, bubbles tím/xám, quick-reply gợi ý, emoji, đính kèm file (PDF/DOCX/TXT/MD), nguồn tham khảo mở rộng inline ngay dưới câu trả lời, hiệu ứng typewriter cho đường fallback. Mở app luôn vào phiên mới (chỉ `?c=<id>` mới mở đúng phiên share). Không còn form đăng nhập trên UI (401 báo thẳng trong bubble).
-*   **CLI:** `python -m backend.cli clean|index` để nạp dữ liệu; `clean --stats` xem thống kê chunk.
+### Chạy Docker Compose
 
----
+Docker Compose cung cấp sẵn PostgreSQL/pgvector, Ollama và ứng dụng. Cổng
+`8000`, `5432`, `11434` mặc định chỉ bind vào loopback; muốn truy cập qua mạng
+ nội bộ thì bật Nginx profile `edge` và cấu hình TLS.
 
-## 4. Yêu cầu hệ thống
-
-*   Python 3.10+, Node.js 20+ (build frontend)
-*   PostgreSQL 16 + extension pgvector (có sẵn qua `docker compose up db`, image `pgvector/pgvector`)
-*   Ollama (khuyến nghị) hoặc transformers local
-*   RAM/VRAM: `qwen2.5:7b` ~4.7GB cần ~8GB; có thể dùng `qwen2.5:1.5b/0.5b/3b` nếu hạn chế
-
----
-
-## 5. Cài đặt
+## 4. Cài đặt và chạy local
 
 ```powershell
-# 1. Tạo venv & kích hoạt
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned
 python -m venv venv
 .\venv\Scripts\Activate.ps1
-
-# 2. Cài dependencies
 pip install -r requirements.txt
-
-# 3. Cài Ollama (https://ollama.com)
-ollama pull qwen2.5        # hoặc qwen2.5:1.5b nếu máy yếu
-ollama serve               # chạy ở terminal riêng
 ```
 
----
-
-## 6. Sử dụng nhanh
-
-### 6.1 Tiền xử lý
-```powershell
-python -m backend.cli clean                 # toàn bộ data/classified → data/processed/*.parquet
-python -m backend.cli clean --stats         # xem thống kê
-python -m backend.cli clean --dry-run       # chỉ thử, không ghi
-
-# Trong Python
-from backend.preprocessing.pipeline import process_all
-from backend.config.settings import DATA_DIR
-process_all(DATA_DIR)
-```
-
-### 6.2 Indexing
-```powershell
-python -m backend.cli index                 # build incremental
-python -m backend.cli index --rebuild       # build lại toàn bộ
-```
-
-### 6.3 Hỏi-đáp CLI
-
-**Đơn lượt (trong Python hoặc qua API — không còn CLI riêng):**
-```powershell
-# Hỏi qua API đang chạy:
-curl -X POST http://localhost:8000/api/chat -H "Content-Type: application/json" -d '{"question":"Quy chế đào tạo là gì?","use_rerank":true,"show_context":true}'
-```
-
-**Hội thoại nhiều lượt:** dùng giao diện web (`http://127.0.0.1:8000/`, luôn mở phiên mới, sidebar có nút Đoạn chat mới + lịch sử nhóm ngày) hoặc truyền `history` + `session_id` qua `POST /api/chat`.
-
-Trong Python:
-```python
-from backend.generation.rag import answer, answer_with_history
-
-# Đơn lượt
-res = answer("Học bổng KKHT xét thế nào?", use_rerank=True)
-
-# Có lịch sử
-history = [
-    {"role": "user", "content": "Quy chế đào tạo là gì?"},
-    {"role": "assistant", "content": "Là quy định về đào tạo..."}
-]
-res = answer_with_history("Điều kiện trong nó là gì?", history=history, use_rerank=True)
-print(res["standalone_question"])  # câu đã viết lại
-print(res["answer"])
-```
-
-### 6.4 Chạy Fullstack (API + Frontend)
+Tạo `.env` từ [.env.example](.env.example), sau đó khởi động PostgreSQL và
+Ollama:
 
 ```powershell
-# 1. Chuẩn bị dữ liệu
+ollama pull qwen2.5:1.5b
+ollama serve
+```
+
+Nếu dùng PostgreSQL local, đặt `DATABASE_URL` trong `.env` trỏ tới
+`localhost:5432`. Nạp dữ liệu và tạo index:
+
+```powershell
 python -m backend.cli clean
 python -m backend.cli index --rebuild
+```
 
-# 2. Chạy API (phục vụ cả frontend) — cách khuyến nghị:
+Chạy API (API cũng phục vụ frontend đã build):
+
+```powershell
 .\start-server.bat
-# (tự tắt process cũ kẹt port 8000 rồi chạy uvicorn foreground; Ctrl+C để dừng)
-# Thủ công:
+# hoặc:
 uvicorn backend.api:app --host 127.0.0.1 --port 8000
-# hoặc
-python -m backend.api
-
-# 3. Mở trình duyệt
-# Frontend:   http://127.0.0.1:8000/  (luôn mở phiên chat mới)
-# API Docs:   http://127.0.0.1:8000/docs
-# Health:     http://127.0.0.1:8000/api/health
 ```
 
-> **1 port = 1 server.** Nếu báo `10048` (port bận) thì chạy `.\stop-server.bat` trước, hoặc dùng luôn server đang chạy.
+Mở `http://127.0.0.1:8000/`; Swagger ở
+`http://127.0.0.1:8000/docs`. Dùng `.\stop-server.bat` để dừng server chạy
+trên cổng 8000.
 
----
+### Phát triển frontend riêng
 
-## 7. API
+```powershell
+Set-Location frontend
+npm install
+npm run dev
+```
 
-| Method | Endpoint | Mô tả |
-|--------|----------|-------|
-| GET | `/` | Frontend |
-| GET | `/docs` | Swagger UI |
-| GET | `/api/health` | Kiểm tra `vector_count` + `processed_files` |
-| GET | `/api/stats` | Thống kê chi tiết + `active_sessions` |
+Mở `http://localhost:5173`. Vite proxy các request `/api` tới backend
+`http://127.0.0.1:8000`. Build production bằng `npm run build`; backend sẽ
+serve thư mục `frontend/dist`.
+
+## 5. Chạy bằng Docker Compose
+
+```powershell
+Copy-Item .env.example .env
+# Sửa tối thiểu POSTGRES_PASSWORD và ADMIN_PASSWORD trong .env
+
+docker compose up -d --build
+docker compose exec ollama ollama pull qwen2.5:1.5b
+docker compose exec app python -m backend.cli clean
+docker compose exec app python -m backend.cli index --rebuild
+```
+
+Kiểm tra:
+
+```powershell
+Invoke-WebRequest http://127.0.0.1:8000/api/health
+```
+
+Bật reverse proxy (sau khi đặt certificate vào `infra/nginx/certs/` và kiểm
+tra `infra/nginx/nginx.conf`):
+
+```powershell
+docker compose --profile edge up -d
+```
+
+Dữ liệu PostgreSQL, Ollama và dữ liệu ứng dụng nằm trong các named volume
+`pgdata`, `ollama_data`, `app_data`. Thư mục `data/classified` được mount
+read-only vào container.
+
+## 6. Tiền xử lý và indexing
+
+```powershell
+# Xem trợ giúp
+python -m backend.cli --help
+
+# Làm sạch toàn bộ data/classified
+python -m backend.cli clean
+
+# Chỉ xem thống kê, không thay đổi dữ liệu
+python -m backend.cli clean --stats
+
+# Chạy thử không ghi file
+python -m backend.cli clean --dry-run
+
+# Index tăng dần, bỏ qua file không đổi theo mtime
+python -m backend.cli index
+
+# Xóa collection cũ và embed lại toàn bộ
+python -m backend.cli index --rebuild
+```
+
+Pipeline tạo các chunk trong `data/processed`. Lệnh `index` dùng manifest
+`data/processed/.indexed.json` để chỉ embed file mới hoặc đã thay đổi. Sau khi
+đổi model embedding hoặc thay đổi cách chunking, cần dùng `--rebuild`.
+
+## 7. Cấu hình quan trọng
+
+Các biến đầy đủ nằm trong [.env.example](.env.example). Một số biến thường dùng:
+
+| Nhóm | Biến | Mặc định | Ý nghĩa |
+|---|---|---:|---|
+| LLM | `OLLAMA_BASE` | `http://ollama:11434` | Địa chỉ Ollama |
+| LLM | `LLM_MODEL` | `qwen2.5:1.5b` | Model sinh câu trả lời |
+| Runtime | `LLM_BACKEND` | `ollama` | Backend sinh |
+| Runtime | `DEVICE` | `cpu` | Thiết bị chạy model |
+| DB | `DATABASE_URL` | xem `.env` | Kết nối PostgreSQL |
+| DB | `PGVECTOR_TABLE` | `rag_chunks` | Bảng vector |
+| Auth | `AUTH_ENABLED` | `false` | Bật xác thực API |
+| Limit | `RATE_LIMIT_MAX` | `30` | Số request trong window |
+| Limit | `CHAT_DAILY_LIMIT` | `200` | Số lượt chat/user/ngày |
+| Cache | `CACHE_ENABLED` | `true` | Bật cache câu hỏi |
+| Cache | `CACHE_TTL_SECONDS` | `600` | TTL cache |
+| Upload | `MAX_UPLOAD_MB_PER_USER` | `500` | Hạn mức upload/user |
+| Security | `CLAMAV_ENABLED` | `false` | Quét file qua ClamAV |
+
+Không commit `.env`, mật khẩu, token hoặc certificate vào repository. Khi triển
+khai thật, phải đổi các giá trị mẫu `POSTGRES_PASSWORD` và `ADMIN_PASSWORD`.
+
+## 8. API chính
+
+| Method | Endpoint | Mục đích |
+|---|---|---|
+| GET | `/api/health` | Trạng thái app, số file và vector |
+| GET | `/api/stats` | Thống kê index và session |
 | GET | `/api/categories` | Danh sách category |
-| GET | `/api/sessions` | Danh sách phiên |
-| GET | `/api/sessions/{id}` | Chi tiết phiên (history, summary) |
-| DELETE | `/api/sessions/{id}` | Xóa phiên |
-| POST | `/api/chat` | Hỏi đáp hội thoại (blocking, fallback) |
-| POST | `/api/chat/stream` | Hỏi đáp streaming SSE (mặc định trên UI) |
-| POST | `/api/clean` | Trả về stats (không chạy clean) |
+| POST | `/api/chat` | Hỏi đáp blocking |
+| POST | `/api/chat/stream` | Hỏi đáp streaming SSE |
+| GET/POST | `/api/sessions` | Liệt kê/tạo phiên |
+| GET/PATCH/DELETE | `/api/sessions/{id}` | Đọc/sửa/xóa phiên |
+| GET/POST/DELETE | `/api/sessions/{id}/upload...` | Quản lý file theo phiên |
+| POST | `/api/auth/login` | Đăng nhập khi bật auth |
+| GET | `/docs` | Swagger UI |
 
-**POST /api/chat:**
+Ví dụ hỏi đáp:
 
-Request:
-```json
-{
-  "question": "Điều kiện trong nó là gì?",
-  "category": "quy_che",
-  "top_k": 3,
-  "use_rerank": true,
-  "show_context": true,
-  "history": [{"role": "user", "content": "Quy chế đào tạo là gì?"}, {"role": "assistant", "content": "..."}],
-  "session_id": "uuid-optional",
-  "use_history": true
-}
+```powershell
+$body = @{
+  question = "Sinh viên khi đến trường phải mặc trang phục thế nào?"
+  top_k = 5
+  use_rerank = $true
+  show_context = $true
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Uri http://127.0.0.1:8000/api/chat `
+  -Method Post -ContentType "application/json" -Body $body
 ```
 
-Response:
-```json
-{
-  "answer": "...",
-  "sources": [{"filename": "quyche.pdf", "page": 2, "category": "quy_che"}],
-  "context": [{"text": "...", "metadata": {}, "score": 0.85}],
-  "session_id": "uuid",
-  "standalone_question": "Điều kiện tốt nghiệp trong quy chế đào tạo là gì?",
-  "summary": "Tóm tắt hội thoại cũ...",
-  "history_used": [{"role": "user", "content": "..."}]
-}
+`/api/chat` trả về `answer`, `sources`, `session_id`,
+`standalone_question` và context nếu yêu cầu. Khi dùng UI, streaming được ưu
+tiên và client có fallback về endpoint blocking.
+
+## 9. Đánh giá và số liệu hiện tại
+
+### 9.1 Benchmark RAG 10 câu
+
+Chạy từ thư mục gốc:
+
+```powershell
+python tools/eval/eval_rag.py --top-k 5
 ```
 
-Ví dụ curl:
-```bash
-curl -X POST http://localhost:8000/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"question":"Quy chế đào tạo là gì?","use_rerank":true,"show_context":true}'
+Ground-truth nằm ở `tools/eval/golden.json`; kết quả đầy đủ được ghi vào
+`tools/eval/last_eval.json`. Lần đo gần nhất dùng `qwen2.5:1.5b`, `n=10`,
+`top_k=5`:
 
-# Hội thoại
-curl -X POST http://localhost:8000/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"question":"Trong nó, học bổng xét thế nào?","history":[{"role":"user","content":"Quy chế đào tạo là gì?"},{"role":"assistant","content":"..."}],"session_id":"my-session-1"}'
+| Tầng | Chỉ số | Kết quả |
+|---|---|---:|
+| Retrieval | Hit@5 | **1.00** |
+| Retrieval | MRR@5 | **1.00** |
+| Retrieval | Context precision@5 | **0.50** |
+| Retrieval | Context recall | **1.00** |
+| Generation | Lexical F1 | **0.5459** |
+| Generation | Keyword coverage | **0.7250** |
+| Generation | Faithfulness heuristic | **1.00** |
+
+
+Diễn giải: cả 10 câu đều tìm được tài liệu liên quan và tài liệu vàng luôn ở
+hạng đầu. Precision 0.50 nghĩa là trung bình khoảng một nửa context top-5
+được chấm là relevant theo bộ golden; đây không phải tỷ lệ câu trả lời đúng.
+F1 0.5459 và keyword coverage 0.725 phản ánh chất lượng diễn đạt của model,
+không phủ định kết quả retrieval. Faithfulness 1.00 là heuristic dựa trên
+độ trùng token với context, không phải đánh giá độc lập của con người.
+
+`--judge 1` bật LLM-as-judge, nhưng model 1.5B thường không trả đúng format
+chấm điểm; vì vậy kết quả hiện tại để `null`. Muốn dùng chỉ số này cần model
+lớn hơn và kiểm tra lại bằng đánh giá thủ công.
+
+### 9.2 Thống kê dữ liệu đã xử lý
+
+Lần thống kê gần nhất có **11 file parquet và 503 chunks**, gồm:
+
+- `chunk_mode`: contextual 149, table_struct 9, figure 1.
+- Category: `thong_bao` 16, `tai_lieu_huong_dan` 23, `quy_dinh` 60,
+  `quy_che` 40, `quyet_dinh` 20.
+
+### 9.3 Smoke test HTTP
+
+```powershell
+python tools/eval/eval_quick.py --base http://127.0.0.1:8000 --top-k 5
 ```
 
----
+Smoke test đo latency, nguồn trả về và keyword qua API. Không được dùng kết quả
+smoke test khi PostgreSQL chưa có index để kết luận chất lượng RAG: nếu
+`vector_count=0`, API có thể chờ DB rồi trả fallback không có nguồn. Trước khi
+đo cần đảm bảo `/api/health` ở trạng thái sẵn sàng và `vector_count > 0`.
 
-## 8. Frontend (React + TypeScript + Vite)
+## 10. Giới hạn và hướng cải thiện
 
-`frontend/` là project Vite. Dev: `cd frontend && npm install && npm run dev` (proxy `/api` → `http://127.0.0.1:8000`, mở `http://localhost:5173`, vẫn cần backend chạy song song). Prod: `npm run build` → `frontend/dist/`, được `backend/api/app.py` serve tại `/` (ưu tiên `dist`, fallback thư mục `frontend/`).
+- Benchmark hiện tại chủ yếu đo BM25 offline; nhánh hybrid vector + pgvector
+  cần được đo lại trên môi trường có database và index đầy đủ.
+- Bộ golden mới có 10 câu, chưa đại diện toàn bộ tài liệu và chưa bao phủ đầy
+  đủ câu hỏi ngoài miền.
+- Model 1.5B có thể bỏ sót chi tiết, đặc biệt câu hỏi nhiều điều kiện; nên
+  thử model lớn hơn, prompt kiểm chứng và đánh giá thủ công.
+- Reranker `ms-marco-MiniLM-L-6-v2` là model tiếng Anh, có thể kém phù hợp
+  tiếng Việt. Cần benchmark thêm reranker tiếng Việt trước khi bật mặc định.
+- Các chỉ số lexical không đo đầy đủ tính đúng pháp lý, tính mới của văn bản
+  hoặc mức độ hữu ích của câu trả lời.
 
-*   `src/App.tsx` — Luồng chat: sidebar lịch sử, streaming SSE + fallback blocking, upload theo phiên, polling health. Mở app luôn tạo phiên mới (trừ `?c=<id>`).
-*   `src/components.tsx` — Sidebar lịch sử nhóm ngày, header bot + online, bubbles, quick-reply pills, composer (ô nhập + gửi + emoji + đính kèm), nguồn inline, uploads bar. Không còn sidebar 3 cột / panel nguồn rời / modal login-thống kê cũ.
-*   `src/api/client.ts` — Typed client cho mọi endpoint (`/api/chat`, `/api/chat/stream` SSE, sessions, uploads, auth...), tự gắn Bearer `rag_token`.
-*   Dùng mặc định `use_rerank=true`, luôn nhớ hội thoại. Hỗ trợ gõ `quy_che: câu hỏi` để lọc danh mục ngay trong ô chat. Keys `localStorage`: `rag_sessions_v2`, `rag_active_session_v2`, `rag_token`.
+## 11. Vận hành và sao lưu
+
+- Theo dõi `/api/health`, `/api/stats`, log ứng dụng và dung lượng các volume.
+- Sau khi thêm/sửa tài liệu: chạy `clean`, kiểm tra thống kê, rồi chạy
+  `index` (hoặc `--rebuild` khi thay đổi embedding/chunking).
+- Dùng `tools/ops/backup.py` để backup/restore theo hướng dẫn của script.
+- Chỉ mở API ra ngoài qua reverse proxy có TLS; giữ PostgreSQL và Ollama ở
+  loopback hoặc network nội bộ.
+- Bật `AUTH_ENABLED=true`, đổi mật khẩu mẫu, giới hạn rate/quota và cân nhắc
+  `CLAMAV_ENABLED=true` trước khi cho phép upload từ người dùng không tin cậy.

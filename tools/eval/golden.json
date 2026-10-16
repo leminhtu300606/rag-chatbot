@@ -1,0 +1,183 @@
+[
+  {
+    "category": "quy_dinh",
+    "golden_file": "VĂN HÓA HỌC ĐƯỜNG",
+    "golden_keywords": [
+      "cổ áo",
+      "Thẻ học viên"
+    ],
+    "question": "Sinh viên khi đến trường phải mặc trang phục thế nào?",
+    "ref_keywords": [
+      "thẻ",
+      "cổ áo",
+      "gọn gàng",
+      "lịch sự"
+    ],
+    "reference": "Sinh viên khi đến trường phải đeo Thẻ học viên-sinh viên do Học viện cấp, mặc trang phục gọn gàng, lịch sự, kín đáo, áo có cổ và tay áo lịch sự.",
+    "golden_files": [
+      "VĂN HÓA HỌC ĐƯỜNG"
+    ]
+  },
+  {
+    "category": "thong_bao",
+    "golden_file": "XÉT HỌC BỔNG KKHT",
+    "golden_keywords": [
+      "84/2020",
+      "08/2021"
+    ],
+    "question": "Xét học bổng khuyến khích học tập kỳ 1 năm 2025-2026 căn cứ vào văn bản nào?",
+    "ref_keywords": [
+      "84/2020",
+      "08/2021",
+      "học bổng"
+    ],
+    "reference": "Xét học bổng khuyến khích học tập kỳ 1 năm học 2025-2026 cho sinh viên đại học chính quy hệ dân sự, căn cứ Nghị định 84/2020/NĐ-CP và Thông tư 08/2021/TT-BGDĐT.",
+    "golden_files": [
+      "XÉT HỌC BỔNG KKHT"
+    ]
+  },
+  {
+    "category": "thong_bao",
+    "golden_file": "XÉT HỌC BỔNG KKHT",
+    "golden_keywords": [
+      "tín chỉ",
+      "khung đào tạo"
+    ],
+    "question": "Điều kiện học tập để sinh viên được xét học bổng khuyến khích học tập là gì?",
+    "ref_keywords": [
+      "tín chỉ",
+      "khung đào tạo",
+      "đủ số môn"
+    ],
+    "reference": "Sinh viên phải đăng ký đủ số môn và số tín chỉ theo chuẩn khung đào tạo.",
+    "golden_files": [
+      "XÉT HỌC BỔNG KKHT"
+    ]
+  },
+  {
+    "category": "thong_bao",
+    "golden_file": "MIỄN GIẢM HỌC PHÍ",
+    "golden_keywords": [
+      "238/2025"
+    ],
+    "question": "Chế độ miễn, giảm học phí học kỳ 2 năm học 2025-2026 thực hiện theo văn bản nào?",
+    "ref_keywords": [
+      "238/2025",
+      "miễn",
+      "giảm học phí"
+    ],
+    "reference": "Chế độ miễn, giảm học phí học kỳ 2 năm học 2025-2026 cho sinh viên đại học chính quy thực hiện theo Nghị định 238/2025/NĐ-CP của Chính phủ.",
+    "golden_files": [
+      "MIỄN GIẢM HỌC PHÍ"
+    ]
+  },
+  {
+    "category": "quy_dinh",
+    "golden_file": "qdhv-2025-435",
+    "golden_keywords": [
+      "7 ngày",
+      "lệ phí"
+    ],
+    "question": "Thí sinh muốn phúc khảo bài thi kết thúc học phần phải làm gì?",
+    "ref_keywords": [
+      "phúc khảo",
+      "lệ phí",
+      "7 ngày"
+    ],
+    "reference": "Thí sinh có nhu cầu phúc khảo bài thi kết thúc học phần thì làm đơn và đóng lệ phí phúc khảo chậm nhất 7 ngày làm việc kể từ ngày công bố kết quả.",
+    "golden_files": [
+      "qdhv-2025-435",
+      "QUY ĐỊNH VỀ CÔNG TÁC KHẢO THÍ"
+    ]
+  },
+  {
+    "category": "quy_dinh",
+    "golden_file": "qdhv-2025-435",
+    "golden_keywords": [
+      "thanh tra",
+      "giám sát"
+    ],
+    "question": "Quy định về công tác khảo thí nhằm mục đích gì?",
+    "ref_keywords": [
+      "thanh tra",
+      "giám sát",
+      "quản lý"
+    ],
+    "reference": "Quy định làm căn cứ để Giám đốc Học viện phân công, bố trí nhân lực, tăng hiệu quả quản lý, thanh tra, giám sát, khen thưởng và xử lý vi phạm trong công tác khảo thí.",
+    "golden_files": [
+      "qdhv-2025-435",
+      "QUY ĐỊNH VỀ CÔNG TÁC KHẢO THÍ"
+    ]
+  },
+  {
+    "category": "tai_lieu_huong_dan",
+    "golden_file": "Chương I",
+    "golden_keywords": [
+      "khiển trách",
+      "cảnh cáo"
+    ],
+    "question": "Học viên bị kỷ luật thì xếp loại rèn luyện thế nào?",
+    "ref_keywords": [
+      "khiển trách",
+      "cảnh cáo",
+      "rèn luyện"
+    ],
+    "reference": "Học viên bị kỷ luật mức khiển trách thì xếp loại rèn luyện không vượt quá loại Khá, mức cảnh cáo không vượt quá loại Trung bình, mức đình chỉ học tập thì không đánh giá.",
+    "golden_files": [
+      "Chương I",
+      "1539"
+    ]
+  },
+  {
+    "category": "thong_bao",
+    "golden_file": "tbhv-2024-331",
+    "golden_keywords": [
+      "gian lận",
+      "công bằng"
+    ],
+    "question": "Vì sao cấm sử dụng đồng hồ thông minh trong thi cử?",
+    "ref_keywords": [
+      "gian lận",
+      "công bằng",
+      "đồng hồ"
+    ],
+    "reference": "Cấm sử dụng đồng hồ thông minh nhằm phòng chống gian lận trong thi cử, đảm bảo sự công bằng, khách quan khi đánh giá kết quả người học.",
+    "golden_files": [
+      "tbhv-2024-331"
+    ]
+  },
+  {
+    "category": "quy_dinh",
+    "golden_file": "VĂN HÓA HỌC ĐƯỜNG",
+    "golden_keywords": [
+      "Thẻ học viên",
+      "đến trường"
+    ],
+    "question": "Sinh viên không thuộc chuyên ngành Kỹ thuật mật mã khi đến trường phải mang theo gì?",
+    "ref_keywords": [
+      "thẻ",
+      "học viên"
+    ],
+    "reference": "Học viên-sinh viên phải đeo Thẻ học viên-sinh viên được Học viện cấp khi đến trường.",
+    "golden_files": [
+      "VĂN HÓA HỌC ĐƯỜNG"
+    ]
+  },
+  {
+    "category": "thong_bao",
+    "golden_file": "XÉT HỌC BỔNG KKHT",
+    "golden_keywords": [
+      "dân sự",
+      "chính quy"
+    ],
+    "question": "Học bổng khuyến khích học tập kỳ 1 năm 2025-2026 dành cho đối tượng sinh viên nào?",
+    "ref_keywords": [
+      "dân sự",
+      "chính quy"
+    ],
+    "reference": "Học bổng dành cho sinh viên đại học chính quy hệ dân sự.",
+    "golden_files": [
+      "XÉT HỌC BỔNG KKHT"
+    ]
+  }
+]
