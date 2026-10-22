@@ -56,21 +56,24 @@ def _use_hybrid() -> bool:
     except Exception:
         return True
 
-def _do_retrieve(query: str, category, top_k: int, session_id: str | None = None):
-    """Unified retrieve: hybrid nếu config bật, fallback vector. Hỗ trợ session_id."""
+def _do_retrieve(query: str, category, top_k: int, session_id: str | None = None, allowed_categories=None):
+    """Unified retrieve: hybrid nếu config bật, fallback vector. Hỗ trợ session_id + RBAC."""
     if _use_hybrid() and hybrid_retrieve is not None:
         try:
-            return hybrid_retrieve(query, top_k=top_k, category=category, session_id=session_id)
+            return hybrid_retrieve(query, top_k=top_k, category=category, session_id=session_id, allowed_categories=allowed_categories)
         except Exception as e:
             print(f"[rag] hybrid fail, fallback vector: {e}")
     # Fallback vector
-    return retrieve(query, category=category, top_k=top_k, dedup=True, session_id=session_id)
+    return retrieve(query, category=category, top_k=top_k, dedup=True, session_id=session_id, allowed_categories=allowed_categories)
 
 # Cache cho chunk trang phục 1.2 để đảm bảo top_k=3 vẫn có bullet dù hybrid rank thấp
 _bullet_cache: dict | None = None
-def _ensure_trang_phuc_coverage(query: str, context: list[dict]) -> list[dict]:
+def _ensure_trang_phuc_coverage(query: str, context: list[dict], allowed_categories=None) -> list[dict]:
     """Đảm bảo câu hỏi trang phục luôn có chunk 1.2 (Mặc áo có cổ) trong context dù top_k nhỏ.
-    Nếu retrieval thiếu do b=0.75 cũ hoặc vector thấp, fallback này chèn thủ công."""
+    Nếu retrieval thiếu do b=0.75 cũ hoặc vector thấp, fallback này chèn thủ công.
+
+    Tôn trọng RBAC: chỉ chèn nếu category của chunk nằm trong allowed_categories.
+    """
     if not query:
         return context
     q_low = query.lower()
@@ -99,6 +102,14 @@ def _ensure_trang_phuc_coverage(query: str, context: list[dict]) -> list[dict]:
         except Exception as e:
             print(f"[rag] bullet cache load fail: {e}")
     if _bullet_cache:
+        # RBAC: chỉ chèn khi category của chunk được phép với user
+        try:
+            if allowed_categories and "*" not in allowed_categories:
+                _cat = (_bullet_cache.get("metadata") or {}).get("category")
+                if _cat not in allowed_categories:
+                    return context
+        except Exception:
+            pass
         # chèn đầu, cắt bớt cuối để giữ đúng top_k nếu cần (caller sẽ cắt)
         return [_bullet_cache] + list(context)
     return context
@@ -238,7 +249,7 @@ def _use_agent() -> bool:
         return False
 
 
-def _manual_retrieve_generate(effective_question, standalone_q, category, top_k, use_rerank, rerank_k, history_window, summary, effective_style, session_id):
+def _manual_retrieve_generate(effective_question, standalone_q, category, top_k, use_rerank, rerank_k, history_window, summary, effective_style, session_id, allowed_categories=None):
     """Block manual cu (fallback khi agent tat/loi)."""
     _top = top_k
     if _top is None:
@@ -246,8 +257,8 @@ def _manual_retrieve_generate(effective_question, standalone_q, category, top_k,
     fetch_k = min(_top * 5, 15) if use_rerank and rerank else _top
     validate_tool_call("retrieve", {"category": category, "top_k": _top})
     query_for_retrieval = standalone_q if standalone_q and standalone_q.strip() else effective_question
-    context = _do_retrieve(query_for_retrieval, category=category, top_k=fetch_k, session_id=session_id)
-    context = _ensure_trang_phuc_coverage(query_for_retrieval, context)
+    context = _do_retrieve(query_for_retrieval, category=category, top_k=fetch_k, session_id=session_id, allowed_categories=allowed_categories)
+    context = _ensure_trang_phuc_coverage(query_for_retrieval, context, allowed_categories=allowed_categories)
     try:
         from backend.common.utils import deduplicate_docs
         context = deduplicate_docs(context)
@@ -300,6 +311,7 @@ def answer(
     style: str | None = None,
     last_math_result: str | None = None,
     session_id: str | None = None,
+    allowed_categories=None,
 ) -> dict:
     """Trả lời câu hỏi ở chế độ đơn lượt (single-turn) - hỗ trợ xã giao và toán học."""
     # Phát hiện đổi phong cách
@@ -488,9 +500,9 @@ def answer(
     query_for_retrieval = effective_question
     # Validate tool call: AI chỉ đề xuất, backend kiểm tra (chỉ validate top_k gốc, fetch_k là mở rộng nội bộ)
     validate_tool_call("retrieve", {"category": category, "top_k": top_k})
-    context = _do_retrieve(query_for_retrieval, category=category, top_k=fetch_k, session_id=session_id)
+    context = _do_retrieve(query_for_retrieval, category=category, top_k=fetch_k, session_id=session_id, allowed_categories=allowed_categories)
     # Đảm bảo câu trang phục luôn có bullet dù top_k=3 (fallback)
-    context = _ensure_trang_phuc_coverage(query_for_retrieval, context)
+    context = _ensure_trang_phuc_coverage(query_for_retrieval, context, allowed_categories=allowed_categories)
     # Fallback dedup nếu retriever chưa dedup
     try:
         from backend.common.utils import deduplicate_docs
@@ -544,6 +556,7 @@ def answer_with_history(
     style: str | None = None,
     last_math_result: str | None = None,
     session_id: str | None = None,
+    allowed_categories=None,
 ) -> dict:
     """Trả lời có ngữ cảnh hội thoại (conversational) - hỗ trợ đổi phong cách qua câu tự nhiên và toán học."""
     # Phát hiện đổi phong cách
@@ -787,6 +800,7 @@ def answer_with_history(
                 style=effective_style, category=category,
                 top_k=(rerank_k if rerank_k is not None else _top),
                 use_rerank=bool(use_rerank), session_id=session_id,
+                allowed_categories=allowed_categories,
             )
             ag_ctx = ag.get("context") or []
             if not ag_ctx:
@@ -823,4 +837,5 @@ def answer_with_history(
     return _manual_retrieve_generate(
         effective_question, standalone_q, category, top_k, use_rerank, rerank_k,
         history_window, summary, effective_style, session_id,
+        allowed_categories=allowed_categories,
     )

@@ -16,6 +16,9 @@ import requests
 import time
 from functools import lru_cache
 
+import backend.config.settings as cfg
+from backend.infra.concurrency import limit as concurrency_limit
+
 from backend.config.settings import (
     DEVICE,
     GEN_MAX_TOKENS,
@@ -80,7 +83,13 @@ def _call_ollama(messages: list[dict], model: str, max_tokens: int, think: bool 
     try:
         sess = _get_ollama_session()
         # CPU (qwen2.5:7b) rất chậm, cần timeout dài hơn 120s; tăng cho câu dài 1024 tokens
-        resp = sess.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=600)
+        with concurrency_limit("ollama", getattr(cfg, "OLLAMA_MAX_CONCURRENCY", 1), timeout=getattr(cfg, "OLLAMA_SEMAPHORE_TIMEOUT", None)):
+            resp = sess.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=600)
+    except TimeoutError as e:
+        raise RuntimeError(
+            f"Quá tải Ollama: vượt {getattr(cfg, 'OLLAMA_MAX_CONCURRENCY', 1)} request đồng thời. "
+            f"Thử lại sau hoặc tăng OLLAMA_MAX_CONCURRENCY. Chi tiết: {e}"
+        ) from e
     except requests.exceptions.Timeout as e:
         raise RuntimeError(
             f"Ollama timeout sau 600s khi gọi model '{model}' tại {OLLAMA_BASE}. "
@@ -259,21 +268,24 @@ def _call_ollama_stream(messages: list[dict], model: str, max_tokens: int, think
     }
     try:
         sess = _get_ollama_session()
-        resp = sess.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=300, stream=True)
-        resp.raise_for_status()
-        for line in resp.iter_lines():
-            if not line:
-                continue
-            try:
-                import json as _json
-                data = _json.loads(line.decode("utf-8"))
-                chunk = data.get("message", {}).get("content", "")
-                if chunk:
-                    yield chunk
-                if data.get("done"):
-                    break
-            except Exception:
-                continue
+        with concurrency_limit("ollama", getattr(cfg, "OLLAMA_MAX_CONCURRENCY", 1), timeout=getattr(cfg, "OLLAMA_SEMAPHORE_TIMEOUT", None)):
+            resp = sess.post(f"{OLLAMA_BASE}/api/chat", json=payload, timeout=300, stream=True)
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                try:
+                    import json as _json
+                    data = _json.loads(line.decode("utf-8"))
+                    chunk = data.get("message", {}).get("content", "")
+                    if chunk:
+                        yield chunk
+                    if data.get("done"):
+                        break
+                except Exception:
+                    continue
+    except TimeoutError as e:
+        raise RuntimeError(f"Quá tải Ollama (stream): vượt giới hạn đồng thời. Chi tiết: {e}") from e
     except requests.exceptions.Timeout as e:
         raise RuntimeError(f"Ollama stream timeout sau 300s cho model '{model}' tại {OLLAMA_BASE}. Model quá nặng cho CPU, hãy dùng model nhỏ hơn (qwen2.5:1.5b). Chi tiết: {e}") from e
     except requests.exceptions.ConnectionError as e:

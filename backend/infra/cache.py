@@ -29,8 +29,14 @@ def _enabled() -> bool:
         return True
 
 
-def make_key(question: str, category: Optional[str], top_k: Optional[int], style: Optional[str]) -> str:
-    raw = f"{(question or '').strip()}|{category or ''}|{top_k or ''}|{style or ''}"
+def make_key(question: str, category: Optional[str], top_k: Optional[int], style: Optional[str], allowed_categories=None) -> str:
+    """Khóa cache. `allowed_categories` (allow-list RBAC) được đưa vào key để
+    không chia sẻ đáp án giữa các tập quyền khác nhau."""
+    if allowed_categories:
+        cats = "|".join(sorted(str(c) for c in allowed_categories))
+    else:
+        cats = "*"
+    raw = f"{(question or '').strip()}|{category or ''}|{top_k or ''}|{style or ''}|{cats}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 

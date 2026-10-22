@@ -25,9 +25,12 @@ logging.disable(logging.WARNING)
 
 import backend.config.settings as cfg
 from backend.config.settings import DEVICE, EMBED_MODEL
+from backend.infra.concurrency import limit as concurrency_limit
+from threading import Lock
 
 _model = None
 _runtime_device = None
+_model_lock = Lock()
 # Lấy batch size tối ưu theo phần cứng
 def _get_batch_size() -> int:
     try:
@@ -41,14 +44,17 @@ def _get_model():
     global _model
     global _runtime_device
     if _model is None:
-        import torch
-        from transformers import AutoModel, AutoTokenizer
+        # Khóa tránh lazy-load chồng chéo khi nhiều request đồng thời (giảm race/OOM).
+        with _model_lock:
+            if _model is None:
+                import torch
+                from transformers import AutoModel, AutoTokenizer
 
-        _runtime_device = "cuda" if DEVICE.startswith("cuda") and torch.cuda.is_available() else "cpu"
-        tokenizer = AutoTokenizer.from_pretrained(EMBED_MODEL, local_files_only=True)
-        model = AutoModel.from_pretrained(EMBED_MODEL, local_files_only=True).to(_runtime_device)
-        model.eval()
-        _model = (tokenizer, model)
+                _runtime_device = "cuda" if DEVICE.startswith("cuda") and torch.cuda.is_available() else "cpu"
+                tokenizer = AutoTokenizer.from_pretrained(EMBED_MODEL, local_files_only=True)
+                model = AutoModel.from_pretrained(EMBED_MODEL, local_files_only=True).to(_runtime_device)
+                model.eval()
+                _model = (tokenizer, model)
     return _model
 
 
@@ -65,17 +71,18 @@ def embed(texts, batch_size: int | None = None, normalize: bool = True):
     tokenizer, model = _get_model()
     outputs = []
     max_length = 256
-    for start in range(0, len(texts), max(1, batch_size)):
-        batch = texts[start:start + max(1, batch_size)]
-        encoded = tokenizer(batch, padding=True, truncation=True, max_length=max_length, return_tensors="pt")
-        encoded = {key: value.to(model.device) for key, value in encoded.items()}
-        with torch.inference_mode():
-            hidden = model(**encoded).last_hidden_state
-        mask = encoded["attention_mask"].unsqueeze(-1).expand(hidden.size()).float()
-        pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
-        if normalize:
-            pooled = torch.nn.functional.normalize(pooled, p=2, dim=1)
-        outputs.append(pooled.cpu().numpy())
+    with concurrency_limit("torch", getattr(cfg, "TORCH_MAX_CONCURRENCY", 1)):
+        for start in range(0, len(texts), max(1, batch_size)):
+            batch = texts[start:start + max(1, batch_size)]
+            encoded = tokenizer(batch, padding=True, truncation=True, max_length=max_length, return_tensors="pt")
+            encoded = {key: value.to(model.device) for key, value in encoded.items()}
+            with torch.inference_mode():
+                hidden = model(**encoded).last_hidden_state
+            mask = encoded["attention_mask"].unsqueeze(-1).expand(hidden.size()).float()
+            pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
+            if normalize:
+                pooled = torch.nn.functional.normalize(pooled, p=2, dim=1)
+            outputs.append(pooled.cpu().numpy())
     return np.concatenate(outputs, axis=0)
 
 

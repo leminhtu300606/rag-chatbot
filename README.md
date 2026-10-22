@@ -221,6 +221,12 @@ Các biến đầy đủ nằm trong [.env.example](.env.example). Một số bi
 | Limit | `CHAT_DAILY_LIMIT` | `200` | Số lượt chat/user/ngày |
 | Cache | `CACHE_ENABLED` | `true` | Bật cache câu hỏi |
 | Cache | `CACHE_TTL_SECONDS` | `600` | TTL cache |
+| Retrieval | `RETRIEVAL_FUSION` | `weighted` | Cách gộp vector+BM25: `weighted` hoặc `rrf` |
+| Retrieval | `RETRIEVAL_RRF_K` | `60` | Hằng số RRF khi `RETRIEVAL_FUSION=rrf` |
+| Rerank | `RERANK_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Model rerank (đổi sang model tiếng Việt nếu có) |
+| Rerank | `RERANK_HEURISTIC_BOOST` | `1` | Bật boost thủ công (đặt `0` khi dùng reranker tiếng Việt) |
+| Concurrency | `OLLAMA_MAX_CONCURRENCY` | `1` | Số request Ollama song song (CPU nên để 1) |
+| Concurrency | `TORCH_MAX_CONCURRENCY` | `1` | Số suy luận embedding/rerank song song |
 | Upload | `MAX_UPLOAD_MB_PER_USER` | `500` | Hạn mức upload/user |
 | Security | `CLAMAV_ENABLED` | `false` | Quét file qua ClamAV |
 
@@ -231,7 +237,8 @@ khai thật, phải đổi các giá trị mẫu `POSTGRES_PASSWORD` và `ADMIN_
 
 | Method | Endpoint | Mục đích |
 |---|---|---|
-| GET | `/api/health` | Trạng thái app, số file và vector |
+| GET | `/api/health` | Trạng thái app, số file và vector (readiness) |
+| GET | `/api/healthz` | Liveness nhanh cho HEALTHCHECK container |
 | GET | `/api/stats` | Thống kê index và session |
 | GET | `/api/categories` | Danh sách category |
 | POST | `/api/chat` | Hỏi đáp blocking |
@@ -268,12 +275,17 @@ tiên và client có fallback về endpoint blocking.
 Chạy từ thư mục gốc:
 
 ```powershell
-python tools/eval/eval_rag.py --top-k 5
+python tools/eval/eval_rag.py --top-k 5                 # BM25 + sinh câu trả lời
+python tools/eval/eval_rag.py --no-gen                  # chỉ đo retrieval (không cần Ollama/DB)
+python tools/eval/eval_rag.py --retrieval hybrid        # dùng pgvector + BM25 (cần DB có index)
+python tools/eval/eval_rag.py --rerank 1                # đo trước/sau rerank
 ```
 
-Ground-truth nằm ở `tools/eval/golden.json`; kết quả đầy đủ được ghi vào
-`tools/eval/last_eval.json`. Lần đo gần nhất dùng `qwen2.5:1.5b`, `n=10`,
-`top_k=5`:
+Bộ ground-truth nằm ở `tools/eval/golden.json`; kết quả đầy đủ được ghi vào
+`tools/eval/last_eval.json`. Ngoài Hit/MRR/Precision/Recall, benchmark còn đo
+**nDCG@k**, **độ trễ từng tầng** (retrieval/generation/rerank) và **tỉ lệ từ
+chối** trên các câu `"unanswerable": true`. Lần đo gần nhất dùng `qwen2.5:1.5b`,
+`n=10` câu trả lời được (+2 câu không đáp án), `top_k=5`:
 
 | Tầng | Chỉ số | Kết quả |
 |---|---|---:|
@@ -281,6 +293,7 @@ Ground-truth nằm ở `tools/eval/golden.json`; kết quả đầy đủ đư�
 | Retrieval | MRR@5 | **1.00** |
 | Retrieval | Context precision@5 | **0.50** |
 | Retrieval | Context recall | **1.00** |
+| Retrieval | nDCG@5 (đo `--no-gen`) | **0.97** |
 | Generation | Lexical F1 | **0.5459** |
 | Generation | Keyword coverage | **0.7250** |
 | Generation | Faithfulness heuristic | **1.00** |
@@ -316,24 +329,42 @@ smoke test khi PostgreSQL chưa có index để kết luận chất lượng RAG
 `vector_count=0`, API có thể chờ DB rồi trả fallback không có nguồn. Trước khi
 đo cần đảm bảo `/api/health` ở trạng thái sẵn sàng và `vector_count > 0`.
 
+### 9.4 Kiểm thử hồi quy
+
+Bộ test hồi quy cho các bản sửa bảo mật (RBAC, fail-closed, RRF, concurrency)
+chạy không cần DB/Ollama:
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
 ## 10. Giới hạn và hướng cải thiện
 
 - Benchmark hiện tại chủ yếu đo BM25 offline; nhánh hybrid vector + pgvector
   cần được đo lại trên môi trường có database và index đầy đủ.
-- Bộ golden mới có 10 câu, chưa đại diện toàn bộ tài liệu và chưa bao phủ đầy
-  đủ câu hỏi ngoài miền.
+- Bộ golden mới có 10 câu trả lời được + 2 câu không đáp án, chưa đại diện toàn
+  bộ tài liệu và chưa bao phủ đầy đủ câu hỏi ngoài miền.
 - Model 1.5B có thể bỏ sót chi tiết, đặc biệt câu hỏi nhiều điều kiện; nên
   thử model lớn hơn, prompt kiểm chứng và đánh giá thủ công.
 - Reranker `ms-marco-MiniLM-L-6-v2` là model tiếng Anh, có thể kém phù hợp
-  tiếng Việt. Cần benchmark thêm reranker tiếng Việt trước khi bật mặc định.
+  tiếng Việt. Đổi qua `RERANK_MODEL`; cần benchmark (`--rerank 1`) trước khi bật
+  mặc định và đặt `RERANK_HEURISTIC_BOOST=0` khi dùng reranker tiếng Việt.
+- Fusion `weighted` là mặc định; đo `--retrieval hybrid` với `RETRIEVAL_FUSION=rrf`
+  trên golden set trước khi đổi mặc định.
 - Các chỉ số lexical không đo đầy đủ tính đúng pháp lý, tính mới của văn bản
   hoặc mức độ hữu ích của câu trả lời.
 
 ## 11. Vận hành và sao lưu
 
+- `/api/health` là readiness (kèm `vector_count`, `ollama_ok`); `/api/healthz`
+  là liveness dùng cho `HEALTHCHECK` container. Cả app, db và ollama đều có
+  healthcheck trong `docker-compose.yml`.
 - Theo dõi `/api/health`, `/api/stats`, log ứng dụng và dung lượng các volume.
 - Sau khi thêm/sửa tài liệu: chạy `clean`, kiểm tra thống kê, rồi chạy
-  `index` (hoặc `--rebuild` khi thay đổi embedding/chunking).
+  `index` (hoặc `--rebuild` khi thay đổi embedding/chunking). `index` tự dọn
+  chunk của file đã gỡ và chỉ lưu manifest sau khi ghi vector thành công.
+- Giới hạn tải: `OLLAMA_MAX_CONCURRENCY` và `TORCH_MAX_CONCURRENCY` (mặc định 1)
+  tránh nhiều request cùng lúc làm quá tải CPU/RAM trên một worker.
 - Dùng `tools/ops/backup.py` để backup/restore theo hướng dẫn của script.
 - Chỉ mở API ra ngoài qua reverse proxy có TLS; giữ PostgreSQL và Ollama ở
   loopback hoặc network nội bộ.

@@ -12,24 +12,33 @@ Model mặc định: cross-encoder/ms-marco-MiniLM-L-6-v2 (đa năng, chạy CPU
 Có thể đổi RERANK_MODEL sang model tiếng Việt nếu cần.
 """
 from typing import Optional
+from threading import Lock
 
 from sentence_transformers import CrossEncoder
 
 import backend.config.settings as cfg
 from backend.config.settings import DEVICE
+from backend.infra.concurrency import limit as concurrency_limit
 
 # Số kết quả tốt nhất giữ lại sau rerank (tăng lên 4 để đủ 1.1-1.4 cho cách 1)
 DEFAULT_RERANK_TOP_K = 4
 RERANK_TOP_K = DEFAULT_RERANK_TOP_K  # bí danh tương thích
 
 _reranker = None
-RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+_reranker_lock = Lock()
+# Đọc từ settings (env RERANK_MODEL) để có thể đổi sang model tiếng Việt.
+RERANK_MODEL = getattr(cfg, "RERANK_MODEL", None) or "cross-encoder/ms-marco-MiniLM-L-6-v2"
+# Boost thủ công bù cho reranker tiếng Anh; tắt khi dùng reranker tiếng Việt.
+RERANK_HEURISTIC_BOOST = bool(getattr(cfg, "RERANK_HEURISTIC_BOOST", True))
 
 
 def _get_reranker() -> CrossEncoder:
     global _reranker
     if _reranker is None:
-        _reranker = CrossEncoder(RERANK_MODEL, device=DEVICE)
+        # Khóa tránh lazy-load chồng chéo khi nhiều request đồng thời (giảm race/OOM).
+        with _reranker_lock:
+            if _reranker is None:
+                _reranker = CrossEncoder(RERANK_MODEL, device=DEVICE)
     return _reranker
 
 
@@ -80,7 +89,8 @@ def rerank(query: str, documents: list[dict], top_k: Optional[int] = None) -> li
 
     pairs = [[query, doc["text"]] for doc in documents]
     try:
-        scores = _get_reranker().predict(pairs, batch_size=_get_rerank_batch(), show_progress_bar=False)
+        with concurrency_limit("torch", getattr(cfg, "TORCH_MAX_CONCURRENCY", 1)):
+            scores = _get_reranker().predict(pairs, batch_size=_get_rerank_batch(), show_progress_bar=False)
     except TypeError:
         try:
             scores = _get_reranker().predict(pairs)
@@ -100,6 +110,11 @@ def rerank(query: str, documents: list[dict], top_k: Optional[int] = None) -> li
             q_low = query.lower() if isinstance(query, str) else ""
             t_low = (doc.get("text","") or "").lower()
             boost = 0.0
+            if not RERANK_HEURISTIC_BOOST:
+                score = float(score)
+                new_doc["score"] = score
+                reranked.append(new_doc)
+                continue
             if "không thuộc" in q_low and "không thuộc" in t_low:
                 boost += 1.5
             elif "không thuộc" in q_low and "không học" in t_low:

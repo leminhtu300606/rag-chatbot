@@ -89,6 +89,10 @@ RETRIEVAL = {
     "bm25_b": 0.4,
     "vector_weight": 0.4,
     "bm25_weight": 0.6,
+    # Fusion khi gộp 2 nhánh: "weighted" (mặc định, giữ hành vi cũ) | "rrf".
+    # RRF bền vững hơn với lệch thang điểm; đo trên golden set trước khi đổi mặc định.
+    "fusion": os.getenv("RETRIEVAL_FUSION", "weighted").strip().lower(),
+    "rrf_k": int(os.getenv("RETRIEVAL_RRF_K", "60") or 60),
 }
 
 # ── Vision LLM (conditional, CPU-friendly) ──
@@ -176,6 +180,14 @@ def _choose_embed_model() -> str:
         return "dangvantuan/vietnamese-embedding"
 
 EMBED_MODEL = _choose_embed_model()
+
+# ── Reranker ──
+# Model mặc định chạy CPU được; đổi sang model tiếng Việt qua env RERANK_MODEL
+# (ví dụ "AITeamVN/Vietnamese_Reranker") khi có tài nguyên.
+RERANK_MODEL = os.getenv("RERANK_MODEL", "").strip() or "cross-encoder/ms-marco-MiniLM-L-6-v2"
+# Boost/heuristic thủ công (bù cho reranker tiếng Anh). Đặt RERANK_HEURISTIC_BOOST=0
+# khi dùng reranker tiếng Việt để tránh chồng chéo.
+RERANK_HEURISTIC_BOOST = os.getenv("RERANK_HEURISTIC_BOOST", "1").strip().lower() not in ("0", "false", "no", "")
 
 # ── Hội thoại: quản lý ngữ cảnh ──
 # Cân bằng: nhớ từ đầu phiên, tốc độ + chính xác, nói thẳng khi không đủ nguồn
@@ -307,6 +319,13 @@ LLM_MODEL = _env_str("LLM_MODEL", LLM_MODEL)
 LLM_BACKEND = _env_str("LLM_BACKEND", LLM_BACKEND)
 REWRITE_MODEL = os.getenv("REWRITE_MODEL", "") or REWRITE_MODEL
 SUMMARY_MODEL = os.getenv("SUMMARY_MODEL", "") or SUMMARY_MODEL
+
+# ── Giới hạn đồng thời (tránh quá tải CPU/RAM khi nhiều request) ──
+# Số request Ollama xử lý song song (CPU nên để 1; GPU có thể tăng).
+OLLAMA_MAX_CONCURRENCY = _env_int("OLLAMA_MAX_CONCURRENCY", 1)
+OLLAMA_SEMAPHORE_TIMEOUT = _env_int("OLLAMA_SEMAPHORE_TIMEOUT", 1200)  # giây
+# Số lần suy luận torch (embedding/rerank) song song.
+TORCH_MAX_CONCURRENCY = _env_int("TORCH_MAX_CONCURRENCY", 1)
 
 # ── Auth & phân quyền (GĐ2 production) ──
 AUTH_ENABLED = _env_flag("AUTH_ENABLED", False)
@@ -614,6 +633,7 @@ __all__ = [
     "GEN_MAX_TOKENS", "GEN_MAX_TOKENS_SOCIAL",
     "GEN_CONTINUATION_MAX_TOKENS", "GEN_CONTINUATION_THRESHOLD",
     "DEVICE", "USE_GPU", "EMBED_BATCH_SIZE", "RERANK_BATCH_SIZE", "OCR_USE_GPU", "EMBED_MODEL",
+    "RERANK_MODEL", "RERANK_HEURISTIC_BOOST",
     "CONVERSATION_WINDOW", "CONVERSATION_SUMMARY_THRESHOLD", "CONVERSATION_MAX_HISTORY_CHARS",
     "REWRITE_MODEL", "SUMMARY_MODEL", "REWRITE_MAX_TOKENS", "SUMMARY_MAX_TOKENS",
     "CATEGORY_ORDER", "AVAILABLE_STYLES", "STYLE_KEYWORDS", "STYLE_TEMPERATURE", "DEFAULT_STYLE",
@@ -627,6 +647,7 @@ __all__ = [
     "ADMIN_CATEGORIES", "USERS_FILE",
     "RATE_LIMIT_MAX", "RATE_LIMIT_WINDOW", "CHAT_DAILY_LIMIT", "MAX_UPLOAD_MB_PER_USER",
     "CACHE_ENABLED", "CACHE_TTL_SECONDS", "CACHE_MAX_ITEMS",
+    "OLLAMA_MAX_CONCURRENCY", "OLLAMA_SEMAPHORE_TIMEOUT", "TORCH_MAX_CONCURRENCY",
     "LOG_DIR", "LOG_CHAT_JSONL", "CLEANUP_INTERVAL_SECONDS",
     "CLAMAV_ENABLED", "CLAMAV_HOST", "CLAMAV_PORT", "CLAMAV_FAIL_CLOSED",
     # security

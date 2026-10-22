@@ -161,8 +161,19 @@ def _ensure_table(conn, dim: int) -> None:
 
 
 # ── Dịch where filter sang SQL ──
+def _as_sequence(v) -> list:
+    """Chuẩn hóa giá trị thành list để so nhiều category (RBAC allow-list)."""
+    if isinstance(v, (list, tuple, set)):
+        return [x for x in v]
+    return [v]
+
+
 def _where_sql(where) -> tuple[str, list]:
-    """Hỗ trợ: None, {category}, {session_id}, {filename}, {"$and": [...]} lồng 1 cấp."""
+    """Hỗ trợ: None, {category}, {session_id}, {filename}, {"$and": [...]} lồng 1 cấp.
+
+    `category` có thể là scalar hoặc list/tuple/set -> dùng `category = ANY(%s)`
+    để áp allow-list category (least privilege) ngay trong truy vấn DB.
+    """
     if not where:
         return "", []
     if isinstance(where, dict) and len(where) == 1 and "$and" in where:
@@ -177,8 +188,17 @@ def _where_sql(where) -> tuple[str, list]:
         parts, params = [], []
         for k, v in where.items():
             if k == "category":
-                parts.append("category = %s")
-                params.append(v)
+                if isinstance(v, (list, tuple, set)):
+                    seq = list(v)
+                    if not seq:
+                        # allow-list rỗng = không được xem gì -> điều kiện luôn sai
+                        parts.append("FALSE")
+                        continue
+                    parts.append("category = ANY(%s)")
+                    params.append(seq)
+                else:
+                    parts.append("category = %s")
+                    params.append(v)
             elif k == "session_id":
                 parts.append("session_id = %s")
                 params.append(v)
@@ -412,6 +432,34 @@ def delete_chunks(session_id: str, filename: str) -> int:
         return 0
 
 
+def delete_by_source(source: str) -> int:
+    """Xóa tất cả chunk của một source (file đã bị gỡ/đổi nội dung)."""
+    return delete_by_sources([source])
+
+
+def delete_by_sources(sources) -> int:
+    """Xóa tất cả chunk thuộc các source đã cho (so khớp metadata.source).
+
+    Dùng để dọn chunk cũ khi file nguồn bị gỡ hoặc được re-chunk (tránh orphan).
+    Source được chuẩn hóa posix (thay '\\' -> '/') để khớp manifest trên Windows.
+    """
+    seq = [str(s).replace("\\", "/") for s in (sources or []) if s]
+    if not seq:
+        return 0
+    try:
+        with _conn() as conn:
+            if not _table_exists(conn, _table()):
+                return 0
+            cur = conn.execute(
+                f"DELETE FROM {_table()} WHERE replace(metadata ->> 'source', E'\\\\', '/') = ANY(%s)",
+                (seq,),
+            )
+            return int(cur.rowcount or 0)
+    except Exception as e:
+        print(f"[vectorstore] delete_by_sources lỗi: {e}")
+        return 0
+
+
 def count_by_session(session_id: str) -> int:
     try:
         with _conn() as conn:
@@ -468,6 +516,8 @@ __all__ = [
     "get_stats",
     "delete_by_session",
     "delete_chunks",
+    "delete_by_source",
+    "delete_by_sources",
     "count_by_session",
     "list_uploads_by_session",
 ]

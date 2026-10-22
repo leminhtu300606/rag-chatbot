@@ -58,6 +58,7 @@ from backend.indexing.embedder import embed
 from backend.indexing.vectorstore import (
     add_chunks,
     count,
+    delete_by_sources,
     reset_collection,
     get_stats,
 )
@@ -128,6 +129,12 @@ def build(rebuild: bool = False) -> None:
             continue
         to_embed.append(ch)
 
+    # (I2) Dọn chunk của các source đã bị gỡ khỏi data/processed (chỉ incremental).
+    removed = [k for k in manifest.keys() if k not in seen] if not rebuild else []
+    if removed:
+        n_del = delete_by_sources(removed)
+        print(f"[build] Dọn {n_del} chunks của {len(removed)} source đã gỡ khỏi data/processed")
+
     if not to_embed:
         _save_manifest(seen)
         print("Không có dữ liệu mới. Số bản ghi hiện tại:", count())
@@ -162,6 +169,13 @@ def build(rebuild: bool = False) -> None:
     if rebuild:
         print("[build] --rebuild: xóa bảng vector cũ...")
         reset_collection(dim=len(embeddings[0]) if len(embeddings) > 0 else None)
+    else:
+        # (I2) Re-chunk có thể đổi id/ranh giới -> xóa chunk cũ của source sắp ghi lại
+        # để tránh orphan. Chỉ dọn SAU khi embed thành công (giảm cửa sổ mất dữ liệu).
+        changed_sources = sorted({c["source"] for c in to_embed})
+        n_del = delete_by_sources(changed_sources)
+        if n_del:
+            print(f"[build] Dọn {n_del} chunks cũ của {len(changed_sources)} source trước khi ghi lại")
 
     emb_dim = len(embeddings[0]) if len(embeddings) > 0 else 0
     print(f"  Embedding model: {cfg.EMBED_MODEL} | dim={emb_dim} | total={len(embeddings)}")
@@ -207,7 +221,12 @@ def build(rebuild: bool = False) -> None:
                 },
             }
         )
-    add_chunks(items)
+    try:
+        add_chunks(items)
+    except Exception as e:
+        # (I1) Giữ nguyên manifest để lần chạy sau tự phục hồi (re-embed source lỗi).
+        print(f"[build] LỖI ghi vector store, giữ nguyên manifest để chạy lại: {e}", file=sys.stderr)
+        raise
     _save_manifest(seen)
     print("Đã cập nhật vector store. Tổng bản ghi:", count())
     print(f"  Đã lưu {len(items)} chunks + embeddings (dim={emb_dim}) vào pgvector bảng '{cfg.PGVECTOR_TABLE}'")

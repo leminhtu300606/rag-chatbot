@@ -584,6 +584,12 @@ async def health():
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
+@app.get("/api/healthz")
+async def healthz():
+    """Liveness probe: nhanh, không truy vấn DB/đĩa — dùng cho HEALTHCHECK/container."""
+    return {"status": "ok"}
+
+
 @app.get("/api/metrics")
 async def metrics(admin: Dict = Depends(require_admin)):
     """GĐ3: tổng hợp từ data/logs/chat.jsonl (count, latency p50/p95, no-source rate, cache hit)."""
@@ -1178,6 +1184,19 @@ def _guard_rate_quota(request: Request, user: Optional[Dict], count_quota: bool 
             raise HTTPException(status_code=429, detail=str(ve))
 
 
+def _user_allowed_categories(user: Optional[Dict]):
+    """Allow-list category của user (RBAC least privilege).
+
+    None = không giới hạn (auth tắt hoặc user có '*'). list = chỉ các category này.
+    """
+    if not cfg.AUTH_ENABLED or not user:
+        return None
+    cats = user.get("categories") or ["*"]
+    if "*" in cats:
+        return None
+    return list(cats)
+
+
 def _guard_rbac(req: ChatRequest, user: Optional[Dict]) -> None:
     if req.category and not auth_mod.user_can_category(user, req.category):
         raise HTTPException(status_code=403, detail=f"Tài khoản không được xem category '{req.category}'")
@@ -1191,12 +1210,16 @@ def _guard_owner(req: ChatRequest, user: Optional[Dict]) -> None:
             _require_session_owner(req.session_id.strip(), user)
 
 
-def _cacheable(req: ChatRequest):
-    """Key cache cho câu đơn lượt giống hệt (không session/history)."""
+def _cacheable(req: ChatRequest, allowed_categories=None):
+    """Key cache cho câu đơn lượt giống hệt (không session/history).
+
+    Key bao gồm allow-list category của user để không chia sẻ đáp án giữa các
+    tập quyền khác nhau (tránh rò rỉ chéo category).
+    """
     if req.session_id or req.history or req.use_history:
         return None
     from backend.infra import cache as _cache
-    return _cache.make_key(req.question, req.category, req.top_k, req.style)
+    return _cache.make_key(req.question, req.category, req.top_k, req.style, allowed_categories)
 
 
 def _log_chat(user: Optional[Dict], req: ChatRequest, resp, latency: float, cached: bool = False, stream: bool = False) -> None:
@@ -1231,7 +1254,8 @@ async def chat(req: ChatRequest, request: Request, user: Dict = Depends(require_
     _guard_rate_quota(request, user)
     _guard_rbac(req, user)
     _guard_owner(req, user)
-    ckey = _cacheable(req)
+    allowed_categories = _user_allowed_categories(user)
+    ckey = _cacheable(req, allowed_categories)
     if ckey:
         hit = _cache.get(ckey)
         if hit is not None:
@@ -1280,6 +1304,8 @@ def _validate_chat_request(req: ChatRequest) -> None:
 async def _chat_impl(req: ChatRequest, request: Request, user: Optional[Dict]):
     # Backend validation: AI chỉ đề xuất, backend kiểm tra lại (Least Privilege)
     _validate_chat_request(req)
+    # RBAC: giới hạn category truy xuất theo quyền user (kể cả khi category=None)
+    allowed_categories = _user_allowed_categories(user)
 
     # Kiem tra co data truoc khi goi LLM (tranh goi Ollama khi chua co data)
     # Nhưng với câu xã giao, recall lịch sử, toán học hoặc so sánh thì không cần data, cho phép trả lời ngay
@@ -1432,6 +1458,7 @@ async def _chat_impl(req: ChatRequest, request: Request, user: Optional[Dict]):
                     style=effective_style,
                     last_math_result=last_math_result,
                     session_id=session_id,
+                    allowed_categories=allowed_categories,
                 )
             )
             # Output validation: kiểm tra kết quả AI trước khi đưa vào hệ thống
@@ -1583,6 +1610,7 @@ async def _chat_impl(req: ChatRequest, request: Request, user: Optional[Dict]):
                     style=effective_style,
                     last_math_result=last_math_result if 'last_math_result' in locals() else None,
                     session_id=session_id,
+                    allowed_categories=allowed_categories,
                 )
             )
             # Output validation cho nhánh đơn lượt
@@ -1751,6 +1779,7 @@ async def chat_stream(req: ChatRequest, request: Request, user: Dict = Depends(r
     _guard_owner(req, user)
     # Validate như /api/chat
     _validate_chat_request(req)
+    allowed_categories = _user_allowed_categories(user)
     # Tận dụng logic chat thường nhưng stream phần generate
     # Với câu toán/xã giao thì trả ngay không cần stream
     try:
@@ -1862,7 +1891,7 @@ async def chat_stream(req: ChatRequest, request: Request, user: Dict = Depends(r
 
             try:
                 # (0) Cache: câu đơn lượt giống hệt -> trả ngay từng đoạn
-                ckey = _cacheable(req)
+                ckey = _cacheable(req, allowed_categories)
                 if ckey:
                     hit = _cache.get(ckey)
                     if hit is not None:
@@ -1892,8 +1921,8 @@ async def chat_stream(req: ChatRequest, request: Request, user: Dict = Depends(r
                 _top = req.top_k or (DEFAULT_RERANK_TOP_K if req.use_rerank else RETRIEVE_TOP_K)
                 fetch_k = min(_top * 5, 15) if req.use_rerank else _top
                 validate_tool_call("retrieve", {"category": req.category, "top_k": _top})
-                ctx = await run_in_threadpool(lambda: _do_retrieve(standalone_q, category=req.category, top_k=fetch_k, session_id=sid))
-                ctx = _ensure_trang_phuc_coverage(standalone_q, ctx)
+                ctx = await run_in_threadpool(lambda: _do_retrieve(standalone_q, category=req.category, top_k=fetch_k, session_id=sid, allowed_categories=allowed_categories))
+                ctx = _ensure_trang_phuc_coverage(standalone_q, ctx, allowed_categories=allowed_categories)
                 try:
                     ctx = deduplicate_docs(ctx)
                 except Exception:

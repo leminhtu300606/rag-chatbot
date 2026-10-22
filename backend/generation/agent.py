@@ -18,6 +18,7 @@ class ChatState(TypedDict, total=False):
     top_k: int
     use_rerank: bool
     session_id: str | None
+    allowed_categories: list | None
     context: list            # [{text, metadata, score}]
     answer: str
     sources: list
@@ -28,10 +29,10 @@ class ChatState(TypedDict, total=False):
 
 # ── Tools ──
 
-def retrieve_tool(query: str, category=None, top_k: int = 5, session_id: str | None = None) -> list:
+def retrieve_tool(query: str, category=None, top_k: int = 5, session_id: str | None = None, allowed_categories=None) -> list:
     from backend.generation.rag import _do_retrieve, _ensure_trang_phuc_coverage
-    ctx = _do_retrieve(query, category=category, top_k=top_k, session_id=session_id)
-    ctx = _ensure_trang_phuc_coverage(query, ctx)
+    ctx = _do_retrieve(query, category=category, top_k=top_k, session_id=session_id, allowed_categories=allowed_categories)
+    ctx = _ensure_trang_phuc_coverage(query, ctx, allowed_categories=allowed_categories)
     try:
         from backend.common.utils import deduplicate_docs
         ctx = deduplicate_docs(ctx)
@@ -126,7 +127,7 @@ def n_retrieve(state: dict) -> dict:
     # Lan thu lai: mo rong query bang tu khoa goc de tang recall
     if state.get("attempts", 0) > 0 and state.get("question"):
         q = f"{q} {state.get('question', '')}".strip()[:1000]
-    ctx = retrieve_tool(q, category=state.get("category"), top_k=_fetch_k(int(state.get("top_k", 5)), bool(state.get("use_rerank"))), session_id=state.get("session_id"))
+    ctx = retrieve_tool(q, category=state.get("category"), top_k=_fetch_k(int(state.get("top_k", 5)), bool(state.get("use_rerank"))), session_id=state.get("session_id"), allowed_categories=state.get("allowed_categories"))
     return {"context": ctx}
 
 
@@ -216,7 +217,7 @@ def get_graph():
     return _compiled
 
 
-def run_agent(question: str, history=None, summary=None, style=None, category=None, top_k: int = 5, use_rerank: bool = True, session_id: str | None = None) -> dict:
+def run_agent(question: str, history=None, summary=None, style=None, category=None, top_k: int = 5, use_rerank: bool = True, session_id: str | None = None, allowed_categories=None) -> dict:
     """Chay agent 1 luot, tra ve dict tuong thich rag.answer_with_history."""
     import uuid
     graph = get_graph()
@@ -230,6 +231,7 @@ def run_agent(question: str, history=None, summary=None, style=None, category=No
         "top_k": int(top_k or 5),
         "use_rerank": bool(use_rerank),
         "session_id": session_id,
+        "allowed_categories": allowed_categories,
         "context": [],
         "answer": "",
         "sources": [],

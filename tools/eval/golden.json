@@ -179,5 +179,15 @@
     "golden_files": [
       "XÉT HỌC BỔNG KKHT"
     ]
+  },
+  {
+    "category": "thong_bao",
+    "unanswerable": true,
+    "question": "Học phí ngành Kỹ thuật mật mã năm học 2050-2051 là bao nhiêu tiền một tín chỉ?"
+  },
+  {
+    "category": "quy_dinh",
+    "unanswerable": true,
+    "question": "Học viện có mấy căng tin và giờ mở cửa của từng căng tin là gì?"
   }
 ]
